@@ -29,6 +29,18 @@ class TempMailError(RuntimeError):
     pass
 
 
+def _members(payload: Any) -> list[dict[str, Any]]:
+    """mail.tm в разных версиях отдаёт то список, то hydra-обёртку."""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("hydra:member", "member", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
 def gen_password(length: int = 14) -> str:
     """Пароль с гарантией букв/цифр/символа — TikTok режет простые."""
     alphabet = string.ascii_letters + string.digits
@@ -80,7 +92,7 @@ class TempMail:
     def create(self) -> tuple[str, str, str]:
         """Создаёт ящик. Возвращает (адрес, пароль, token)."""
         domains = self._req("GET", "/domains")
-        members = domains.get("hydra:member") or []
+        members = _members(domains)
         if not members:
             raise TempMailError("mail.tm не отдал домены")
         domain = members[0]["domain"]
@@ -103,7 +115,7 @@ class TempMail:
                 log.warning("mail.tm: %s", exc)
                 time.sleep(interval)
                 continue
-            for message in inbox.get("hydra:member") or []:
+            for message in _members(inbox):
                 message_id = str(message.get("id"))
                 if message_id in seen:
                     continue
