@@ -37,6 +37,7 @@ from datetime import datetime
 
 import config
 from captcha_solver import CaptchaSolver
+import domain_check
 from imap_mail import ImapMail
 from proxy_pool import POOL
 from register import AccountRegistrar, append_account
@@ -1138,6 +1139,43 @@ async def cmd_stop(message: Message) -> None:
     if solver and solver.has_pending:
         solver.cancel()
     await message.answer("⏹ Флаг остановки выставлен", reply_markup=kb_main())
+
+
+@router.message(Command("domain"), IsAdmin())
+async def cmd_domain(message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or "." not in parts[1]:
+        await message.answer(
+            "Проверка домена почты.\n\n/domain example.com\n\n"
+            "Скажу: в списке ли одноразовых, и что ответил TikTok на пробную регистрацию."
+        )
+        return
+    domain = parts[1].strip().lower().lstrip("@")
+    await message.answer(f"🔬 Проверяю {domain}: список одноразовых + пробник TikTok…")
+
+    def run() -> str:
+        try:
+            bad = domain_check.is_disposable(domain)
+        except Exception as exc:  # noqa: BLE001
+            bad = None
+            log.warning("список одноразовых: %s", exc)
+        try:
+            probe = domain_check.probe_tiktok(domain)
+        except Exception as exc:  # noqa: BLE001
+            probe = {"verdict": f"пробник упал: {exc}"}
+        lines = [f"🔬 {domain}", ""]
+        if bad is None:
+            lines.append("Список одноразовых: не проверился")
+        else:
+            lines.append("Одноразовый домен: " + ("ДА — TikTok почти наверняка отобьёт" if bad else "нет"))
+        lines.append("")
+        lines.append("TikTok: " + str(probe.get("verdict", "?")))
+        if probe.get("address"):
+            lines.append(f"Пробный адрес: {probe['address']}")
+        return "\n".join(lines)
+
+    result = await asyncio.to_thread(run)
+    await message.answer(result, reply_markup=kb_main())
 
 
 @router.message(Command("logs"), IsAdmin())
