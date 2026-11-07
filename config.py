@@ -41,6 +41,8 @@ HEADLESS: bool = _bool("HEADLESS", True)
 NAV_TIMEOUT: int = _int("NAV_TIMEOUT", 60000)
 ACTION_TIMEOUT: int = _int("ACTION_TIMEOUT", 8000)
 PROXY: str = os.getenv("PROXY", "").strip() or ""
+# Прокси только для регистрации: TikTok режет по IP жёстче, чем по аккаунту.
+REG_PROXY: str = os.getenv("REG_PROXY", "").strip() or ""
 
 # --- Капча ------------------------------------------------------------------
 # Сколько секунд бот ждёт ответа администратора по капче, прежде чем сдаться.

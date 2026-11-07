@@ -82,6 +82,10 @@ def _digits(text: str) -> str:
     return re.sub(r"\D", "", text or "")
 
 
+class SignupBlocked(RuntimeError):
+    """TikTok включил IP-троттлинг регистрации: «Слишком много попыток»."""
+
+
 class AccountRegistrar(TikTokWorker):
     def __init__(self, *args: Any, progress: Optional[Progress] = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -160,8 +164,12 @@ class AccountRegistrar(TikTokWorker):
 
         password = gen_password(14)
 
+        launch_account: dict[str, Any] = {}
+        if config.REG_PROXY:
+            launch_account["proxy"] = config.REG_PROXY
+
         with sync_playwright() as pw:
-            browser = self._launch(pw, {})
+            browser = self._launch(pw, launch_account)
             context = None
             try:
                 context = self._new_context(browser, {})
@@ -352,6 +360,17 @@ class AccountRegistrar(TikTokWorker):
             self._click_first(page, PRIMARY_SELECTORS)
         page.wait_for_timeout(random.randint(2500, 4000))
         self._handle_captcha(page)
+
+        try:
+            body = page.inner_text("body", timeout=3000).lower()
+        except (PWError, PWTimeout):
+            body = ""
+        for marker in ("слишком много попыток", "too many attempts", "too many requests"):
+            if marker in body:
+                raise SignupBlocked(
+                    "TikTok режет регистрацию по IP: «Слишком много попыток». "
+                    "Нужен REG_PROXY в .env или пауза на несколько часов."
+                )
 
         for _ in range(6):
             if self._first_visible(page, CODE_SELECTORS) is not None:

@@ -1,13 +1,12 @@
 # language: Python 3.9+, file: temp_mail.py
-"""Одноразовая почта: 1secmail (основной) и mail.tm (резерв).
+"""Одноразовая почта: mail.gw (основной) и mail.tm (резерв).
 
 Только stdlib — worker живёт в отдельном потоке, ему aiohttp не нужен.
 
-Почему два провайдера: mail.tm отдаёт один домен и режет частые запросы (429),
-из-за этого код подтверждения не забрать. 1secmail даёт десяток доменов и не
-требует регистрации ящика: адрес существует, как только на него пришло письмо.
+Почему два провайдера: mail.tm отдаёт один домен и режет частые запросы (429).
+mails.gw — тот же API, но другая инфраструктура и другой набор доменов.
 
-Токен несёт провайдера — "1sec:<login>@<domain>" или "mtm:<token>", поэтому
+Токен несёт провайдера — "gw:<token>" или "mtm:<token>", поэтому
 wait_for_code знает, куда стучаться.
 """
 from __future__ import annotations
@@ -26,7 +25,7 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 
 CODE_RE = re.compile(r"\b(\d{6})\b")
-ONE_SEC_API = "https://www.1secmail.com/api/v1/"
+MAILGW_API = "https://api.mail.gw"
 
 
 class TempMailError(RuntimeError):
@@ -65,8 +64,9 @@ def extract_code(text: str) -> Optional[str]:
 class TempMail:
     BASE = "https://api.mail.tm"
 
-    def __init__(self, timeout: int = 15) -> None:
+    def __init__(self, timeout: int = 15, base: str = "") -> None:
         self.timeout = timeout
+        self.base = base or self.BASE
 
     # ------------------------------------------------------------------ http
     def _get_json(self, url: str) -> Any:
@@ -91,7 +91,7 @@ class TempMail:
         token: str = "",
     ) -> Any:
         data = json.dumps(payload).encode() if payload is not None else None
-        request = urllib.request.Request(self.BASE + path, method=method, data=data)
+        request = urllib.request.Request(self.base + path, method=method, data=data)
         request.add_header("Content-Type", "application/json")
         request.add_header("Accept", "application/json")
         if token:
@@ -106,50 +106,9 @@ class TempMail:
             raise TempMailError(str(exc)) from exc
         return json.loads(raw) if raw.strip() else {}
 
-    # -------------------------------------------------------------- 1secmail
-    def _create_1sec(self) -> tuple[str, str]:
-        domains = self._get_json(ONE_SEC_API + "?action=getDomainList")
-        if not isinstance(domains, list) or not domains:
-            raise TempMailError("1secmail: пустой список доменов")
-        preferred = [d for d in domains if d in ("1secmail.com", "1secmail.org", "1secmail.net")]
-        domain = (preferred or domains)[0]
-        local = "tt" + "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        log.info("временный ящик (1secmail): %s@%s", local, domain)
-        return f"{local}@{domain}", f"{local}@{domain}"
-
-    def _wait_1sec(self, mailbox: str, timeout: int, interval: int) -> Optional[str]:
-        login, _, domain = mailbox.partition("@")
-        params = urllib.parse.urlencode({"action": "getMessages", "login": login, "domain": domain})
-        deadline = time.time() + timeout
-        seen: set[str] = set()
-        while time.time() < deadline:
-            try:
-                messages = self._get_json(ONE_SEC_API + "?" + params)
-            except TempMailError as exc:
-                log.warning("1secmail: %s", exc)
-                time.sleep(interval)
-                continue
-            for message in messages if isinstance(messages, list) else []:
-                message_id = str(message.get("id"))
-                if message_id in seen:
-                    continue
-                seen.add(message_id)
-                code = extract_code(str(message.get("subject", "")))
-                if code:
-                    return code
-                read = urllib.parse.urlencode(
-                    {"action": "readMessage", "login": login, "domain": domain, "id": message_id}
-                )
-                try:
-                    full = self._get_json(ONE_SEC_API + "?" + read)
-                except TempMailError:
-                    continue
-                body = f"{full.get('subject', '')} {full.get('textBody', '')} {full.get('body', '')}"
-                code = extract_code(body)
-                if code:
-                    return code
-            time.sleep(interval)
-        return None
+    # ----------------------------------------------------------------- mail.gw
+    def _create_gw(self) -> tuple[str, str, str]:
+        return TempMail(self.timeout, base=MAILGW_API)._create_mtm()
 
     # ----------------------------------------------------------------- mail.tm
     def _create_mtm(self) -> tuple[str, str, str]:
@@ -198,15 +157,15 @@ class TempMail:
 
     # --------------------------------------------------------------- внешнее
     def create(self) -> tuple[str, str, str]:
-        """Создаёт ящик. Возвращает (адрес, пароль, token с провайдером)."""
+        """Ящик на mail.gw, при недоступности — mail.tm. В токене — провайдер."""
         error: Optional[Exception] = None
         for _ in range(2):
             try:
-                address, marker = self._create_1sec()
-                return address, "", f"1sec:{marker}"
+                address, password, token = self._create_gw()
+                return address, password, f"gw:{token}"
             except TempMailError as exc:
                 error = exc
-                log.warning("1secmail недоступен: %s", exc)
+                log.warning("mail.gw недоступен: %s", exc)
                 time.sleep(3)
         log.warning("перехожу на mail.tm: %s", error)
         address, password, token = self._create_mtm()
@@ -214,6 +173,6 @@ class TempMail:
 
     def wait_for_code(self, token: str, timeout: int = 240, interval: int = 6) -> Optional[str]:
         provider, _, value = token.partition(":")
-        if provider == "1sec":
-            return self._wait_1sec(value, timeout, interval)
+        if provider == "gw":
+            return TempMail(self.timeout, base=MAILGW_API)._wait_mtm(value, timeout, interval)
         return self._wait_mtm(value, timeout, interval)
