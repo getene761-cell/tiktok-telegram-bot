@@ -510,19 +510,24 @@ class TikTokWorker:
         return self._login_password(page, username, password)
 
     def _api_logged_in(self, page: Page) -> bool:
-        """Проверка сессии через API, а не по иконке: DOM у TikTok часто не рендерится."""
+        """Проверка сессии через API: DOM у TikTok часто пустой, иконки профиля нет."""
+        url = (
+            "https://www.tiktok.com/passport/web/account/info/"
+            "?aid=1459&app_name=tiktok_web&device_platform=web"
+        )
         try:
-            result = page.evaluate(
-                """async () => {
-                    const r = await fetch('/passport/web/account/info/?aid=1459&app_name=tiktok_web&device_platform=web',
-                        {headers: {'Accept': 'application/json'}});
-                    const j = await r.json().catch(() => ({}));
-                    return !!(j && j.data && (j.data.user_id || j.data.user_id_str));
-                }"""
+            response = page.context.request.get(
+                url, headers={"Accept": "application/json"}, timeout=20000
             )
-            return bool(result)
-        except PWError:
+            if response.status != 200:
+                return False
+            payload = response.json()
+        except (PWError, ValueError):
             return False
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("user_id") or data.get("user_id_str"))
 
     def _is_logged_in(self, page: Page) -> bool:
         for sel in (
