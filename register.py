@@ -84,6 +84,10 @@ def _digits(text: str) -> str:
     return re.sub(r"\D", "", text or "")
 
 
+class PageNotOpened(RuntimeError):
+    """Форма регистрации не открылась: прокси умер или IP в блоке — пробуем другой."""
+
+
 class SignupBlocked(RuntimeError):
     """TikTok включил IP-троттлинг регистрации: «Слишком много попыток»."""
 
@@ -106,6 +110,12 @@ class AccountRegistrar(TikTokWorker):
         self.status.reset()
         self.status.is_running = True
         self.status.started_at = time.time()
+        try:
+            if config.USE_PROXY_POOL:
+                alive = POOL.refresh_if_stale(min_alive=5, max_age=1800)
+                log.info("пул прокси: %d рабочих", alive)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("пул прокси не обновлён: %s", exc)
         total = max(1, min(20, int(count)))
         for index in range(total):
             if self.stop_event.is_set():
@@ -121,7 +131,7 @@ class AccountRegistrar(TikTokWorker):
                 try:
                     account = self._register_one(index, email_mode, custom_email)
                     break
-                except (SignupBlocked, PWError) as exc:
+                except (SignupBlocked, PageNotOpened, PWError) as exc:
                     # прокси-проблема (туннель/таймаут) или IP-троттлинг: меняем прокси
                     log.warning("попытка %d/3 провалилась: %s", attempt + 1, exc)
                     if self._active_proxy:
@@ -225,7 +235,7 @@ class AccountRegistrar(TikTokWorker):
                     pass
 
                 if not self._open_signup(page):
-                    raise RuntimeError("не открылась страница регистрации")
+                    raise PageNotOpened("не открылась страница регистрации")
 
                 if not self._fill_form(page, email, password):
                     self._dump_screenshot(page, index, "form")
