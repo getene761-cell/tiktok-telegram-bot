@@ -204,6 +204,22 @@ def parse_cookie_payload(raw: Any) -> list[dict[str, Any]]:
         text = str(raw).strip()
         if not text:
             return []
+        # строка Cookie-заголовка: "sessionid=...; ttwid=...; msToken=..."
+        if "=" in text and ";" in text and "{" not in text and "\t" not in text:
+            pairs = []
+            for chunk in text.split(";"):
+                name, _, value = chunk.strip().partition("=")
+                if name and value:
+                    pairs.append(
+                        {
+                            "name": name.strip(),
+                            "value": value.strip(),
+                            "domain": ".tiktok.com",
+                            "path": "/",
+                        }
+                    )
+            if pairs:
+                return [c for c in (_norm_cookie(x) for x in pairs) if c]
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
@@ -232,6 +248,13 @@ def parse_cookie_payload(raw: Any) -> list[dict[str, Any]]:
 
     if isinstance(data, dict) and "cookies" in data:
         data = data["cookies"]
+    if isinstance(data, dict) and not data.get("cookies") and not data.get("value"):
+        # {"sessionid": "...", "ttwid": "..."} — плоская карта cookie
+        data = [
+            {"name": str(key), "value": str(value), "domain": ".tiktok.com", "path": "/"}
+            for key, value in data.items()
+            if isinstance(value, (str, int))
+        ]
     if not isinstance(data, list):
         return []
     return [c for c in (_norm_cookie(x) for x in data if isinstance(x, dict)) if c]
