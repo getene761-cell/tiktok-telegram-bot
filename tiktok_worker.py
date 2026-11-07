@@ -97,6 +97,8 @@ NEXT_ARROW_SELECTORS = (
 )
 
 CAPTCHA_CONTAINER_SELECTORS = (
+    "tiktok-captcha",
+    "tiktok-captcha-container",
     "#captcha-verify-image",
     'div[class*="captcha_verify_container"]',
     'div[id*="captcha-verify"]',
@@ -708,9 +710,18 @@ class TikTokWorker:
         try:
             body = page.inner_text("body", timeout=1500).lower()
         except (PWError, PWTimeout):
-            return False
-        return any(marker in body for marker in ("drag the slider", "verify to continue",
-                                                 "пройдите проверку", "подтвердите, что вы не робот"))
+            body = ""
+        if any(marker in body for marker in ("drag the slider", "verify to continue",
+                                             "пройдите проверку", "подтвердите, что вы не робот")):
+            return True
+        # Пустая страница при живом HTML — почти всегда челлендж TikTok на капчу
+        if not body.strip():
+            try:
+                if page.locator("tiktok-captcha").count():
+                    return True
+            except (PWError, PWTimeout):
+                return False
+        return False
 
     def _captcha_kind(self, page: Page) -> str:
         if self._first_visible(page, SLIDER_SELECTORS) is not None:
