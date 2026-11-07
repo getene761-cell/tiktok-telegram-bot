@@ -120,6 +120,7 @@ class St(StatesGroup):
     settings_value = State()
     cookies_input = State()
     search_query = State()
+    search_date = State()
     search_custom_date = State()
     reg_count = State()
     reg_custom = State()
