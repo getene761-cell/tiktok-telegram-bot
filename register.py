@@ -240,41 +240,76 @@ class AccountRegistrar(TikTokWorker):
                     continue
         return False
 
-    def _pick_birthday(self, page: Page) -> None:
-        """Три кастомных комбобокса: Месяц, День, Год. Выбор — опцией или стрелками."""
-        combos = page.locator('[role="combobox"]')
-        count = combos.count()
-        year, month, day = _random_birthday()
-        if count < 3:
-            return
-        for index, value in enumerate((month, day, year)):
-            if self.stop_event.is_set():
-                return
+    def _select_combo(
+        self,
+        page: Page,
+        combo: Any,
+        wanted: Optional[Iterable[str]] = None,
+        by_index: int = 0,
+    ) -> bool:
+        """Раскрывает комбобокс и жмёт видимую опцию: по тексту или по позиции."""
+        try:
+            combo.click(timeout=4000, force=True)
+            page.wait_for_timeout(900)
+        except (PWError, PWTimeout):
+            return False
+
+        options = page.get_by_role("option")
+        visible: list[Any] = []
+        for index in range(min(options.count(), 400)):
             try:
-                combo = combos.nth(index)
-                combo.click(timeout=4000, force=True)
-                page.wait_for_timeout(700)
+                option = options.nth(index)
+                if option.is_visible():
+                    visible.append(option)
             except (PWError, PWTimeout):
                 continue
+        if not visible:
+            try:
+                page.keyboard.press("Escape")
+            except PWError:
+                pass
+            return False
 
-            picked = False
-            for candidate in (value, value.lstrip("0")):
+        if wanted:
+            for option in visible:
                 try:
-                    option = page.get_by_role("option", name=candidate, exact=True).first
-                    if option.count():
-                        option.click(timeout=3000, force=True)
-                        picked = True
-                        break
+                    text = (option.inner_text() or "").strip()
                 except (PWError, PWTimeout):
                     continue
-            if not picked:
-                presses = int(value) if value.isdigit() else 0
-                if index == 2:  # год — любое взрослое значение, не гоняем 30 стрелок
-                    presses = 3
-                for _ in range(min(presses, 30)):
-                    page.keyboard.press("ArrowDown")
-                page.keyboard.press("Enter")
-            page.wait_for_timeout(300)
+                if text in wanted:
+                    try:
+                        option.click(timeout=2500, force=True)
+                        return True
+                    except (PWError, PWTimeout):
+                        break
+
+        target = visible[min(max(by_index, 0), len(visible) - 1)]
+        try:
+            target.click(timeout=2500, force=True)
+            return True
+        except (PWError, PWTimeout):
+            try:
+                page.keyboard.press("Escape")
+            except PWError:
+                pass
+            return False
+
+    def _pick_birthday(self, page: Page) -> None:
+        """Три комбобокса: Месяц, День, Год. Год — взрослый, по тексту опции."""
+        combos = page.locator('[role="combobox"]')
+        if combos.count() < 3:
+            return
+        year, month, day = _random_birthday()
+        if self.stop_event.is_set():
+            return
+        self._select_combo(page, combos.nth(0), by_index=int(month) - 1)
+        self._select_combo(page, combos.nth(1), by_index=int(day) - 1)
+        self._select_combo(
+            page,
+            combos.nth(2),
+            wanted=[str(value) for value in range(1990, 2004)],
+            by_index=3,  # первые видимые годы — 2025, 2024, 2023, 2022
+        )
 
     def _fill_form(self, page: Page, email: str, password: str) -> bool:
         self.progress("✍️ Заполняю форму регистрации…")
@@ -289,6 +324,11 @@ class AccountRegistrar(TikTokWorker):
         self._pick_birthday(page)
         self._handle_captcha(page)
 
+        password_field = self._first_visible(page, PASSWORD_SELECTORS)
+        if password_field is None:
+            return False
+        self._type_into(password_field, password)
+
         try:
             checkbox = page.locator('input[type="checkbox"]').first
             if checkbox.count() and not checkbox.is_checked():
@@ -296,21 +336,9 @@ class AccountRegistrar(TikTokWorker):
         except (PWError, PWTimeout):
             pass
 
-        if not self._click_text(page, ("Далее", "Next", "Продолжить")):
+        if not self._click_text(page, ("Отправить код", "Зарегистрироваться", "Далее")):
             self._click_first(page, PRIMARY_SELECTORS)
-        page.wait_for_timeout(random.randint(1500, 2500))
-        self._handle_captcha(page)
-
-        password_field = self._first_visible(page, PASSWORD_SELECTORS)
-        if password_field is None:
-            return False
-        self._type_into(password_field, password)
-
-        if not self._click_text(
-            page, ("Зарегистрироваться", "Отправить код", "Далее", "Next")
-        ):
-            self._click_first(page, PRIMARY_SELECTORS)
-        page.wait_for_timeout(random.randint(2000, 3500))
+        page.wait_for_timeout(random.randint(2500, 4000))
         self._handle_captcha(page)
 
         for _ in range(6):
@@ -336,7 +364,7 @@ class AccountRegistrar(TikTokWorker):
             self._type_into(field, code)
             page.wait_for_timeout(500)
             if not self._click_text(
-                page, ("Зарегистрироваться", "Далее", "Продолжить", "Отправить код")
+                page, ("Отправить код", "Зарегистрироваться", "Далее", "Продолжить")
             ):
                 self._click_first(page, PRIMARY_SELECTORS)
             page.wait_for_timeout(random.randint(2500, 4000))
