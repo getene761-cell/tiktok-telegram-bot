@@ -137,7 +137,18 @@ class AccountRegistrar(TikTokWorker):
         if email_mode == "temp":
             mail = TempMail()
             self.progress("📮 Создаю временный ящик mail.tm…")
-            email, email_password, token = mail.create()
+            last_error: Optional[Exception] = None
+            for attempt in range(3):
+                try:
+                    email, email_password, token = mail.create()
+                    break
+                except TempMailError as exc:
+                    last_error = exc
+                    # mail.tm режет частые создания ящиков (429) — ждём и пробуем снова
+                    self.progress(f"📮 mail.tm занят ({exc}), пауза 20 с…")
+                    time.sleep(20)
+            else:
+                raise RuntimeError(f"mail.tm не дал ящик: {last_error}")
         elif email_mode == "custom":
             email = custom_email.strip()
             if not email or "@" not in email:
