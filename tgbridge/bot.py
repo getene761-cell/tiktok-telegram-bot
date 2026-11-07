@@ -52,6 +52,7 @@ DEFAULT_CONTENT = "✅ Готово! Держи то, за чем пришёл:\
 
 class St(StatesGroup):
     channel = State()
+    url = State()
     welcome = State()
     content = State()
     broadcast = State()
@@ -110,7 +111,8 @@ def kb_admin() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats")],
             [InlineKeyboardButton(text="👥 Последние", callback_data="adm:recent")],
-            [InlineKeyboardButton(text="📢 Канал", callback_data="adm:channel")],
+            [InlineKeyboardButton(text="📢 ID канала", callback_data="adm:channel"),
+             InlineKeyboardButton(text="🔗 Ссылка", callback_data="adm:url")],
             [InlineKeyboardButton(text="✍️ Приветствие", callback_data="adm:welcome")],
             [InlineKeyboardButton(text="🎁 Контент после подписки", callback_data="adm:content")],
             [InlineKeyboardButton(text="📨 Рассылка", callback_data="adm:broadcast")],
@@ -222,10 +224,20 @@ async def cb_admin(callback: CallbackQuery, state: FSMContext) -> None:
     elif action == "channel":
         await state.set_state(St.channel)
         await callback.message.edit_text(
-            "Пришли канал в формате:\n"
-            "`-1001234567890|https://t.me/имя`\n\n"
-            "До id: добавь бота админом канала, иначе проверка подписки не сработает.\n"
-            "Чтобы убрать проверку — пришли `-|`.",
+            "📢 ID канала\n\n"
+            f"Сейчас: {db.get('channel_id') or 'не задан (проверка подписки выключена)'}\n\n"
+            "Пришли id вида -1001234567890.\n"
+            "Бота нужно добавить админом канала, иначе проверка не сработает.\n"
+            "Пришли - чтобы выключить проверку.",
+            reply_markup=kb_admin(),
+        )
+    elif action == "url":
+        await state.set_state(St.url)
+        await callback.message.edit_text(
+            "🔗 Ссылка на канал\n\n"
+            f"Сейчас: {db.get('channel_url') or 'не задана'}\n\n"
+            "Пришли ссылку вида https://t.me/имя или https://t.me/+invite\n"
+            "Пришли - чтобы убрать кнопку.",
             reply_markup=kb_admin(),
         )
     elif action == "welcome":
@@ -257,15 +269,30 @@ async def set_channel(message: Message, state: FSMContext) -> None:
     if not message.from_user or not is_admin(message.from_user.id):
         return
     raw = (message.text or "").strip()
-    chat, _, url = raw.partition("|")
-    chat, url = chat.strip(), url.strip()
-    db.set("channel_id", "" if chat in ("-", "") else chat)
-    db.set("channel_url", "" if url in ("-", "") else url)
+    if "|" in raw:  # старый формат id|url
+        chat, _, url = raw.partition("|")
+        db.set("channel_id", "" if chat.strip() in ("-", "") else chat.strip())
+        db.set("channel_url", "" if url.strip() in ("-", "") else url.strip())
+    else:
+        db.set("channel_id", "" if raw in ("-", "") else raw)
     await state.clear()
     await message.answer(
-        f"✅ Канал: {db.get('channel_id') or 'проверка выключена'}\n"
+        "✅ Сохранено.\n"
+        f"📢 ID: {db.get('channel_id') or 'проверка выключена'}\n"
         f"🔗 Ссылка: {db.get('channel_url') or '—'}",
         reply_markup=kb_admin(),
+    )
+
+
+@router.message(St.url, F.text)
+async def set_url(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
+        return
+    raw = (message.text or "").strip()
+    db.set("channel_url", "" if raw in ("-", "") else raw)
+    await state.clear()
+    await message.answer(
+        f"✅ Ссылка: {db.get('channel_url') or 'убрана'}", reply_markup=kb_admin()
     )
 
 
