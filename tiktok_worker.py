@@ -441,11 +441,44 @@ class TikTokWorker:
     def _collect_cookies(self, account: dict[str, Any]) -> list[dict[str, Any]]:
         cookies = read_cookie_file(self._cookie_target(account, str(account.get("name", "acc"))))
         if cookies:
-            return cookies
+            return self._ensure_session_cookies(cookies)
         inline = account.get("cookies")
         if inline:
-            return parse_cookie_payload(inline)
-        return []
+            cookies = parse_cookie_payload(inline)
+        if not cookies:
+            return []
+        return self._ensure_session_cookies(cookies)
+
+    @staticmethod
+    def _ensure_session_cookies(cookies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Экспорт часто приходит без httpOnly-куки sessionid, но sid_guard его содержит.
+
+        sid_guard = "<sessionid>|<ts>|<ttl>|<expires>" — берём первый сегмент и
+        восстанавливаем sessionid/sid_tt/sessionid_ss, иначе аккаунт «не залогинен».
+        """
+        names = {cookie.get("name") for cookie in cookies}
+        if "sessionid" in names:
+            return cookies
+        guard = next(
+            (str(cookie.get("value") or "") for cookie in cookies if cookie.get("name") == "sid_guard"),
+            "",
+        )
+        sid = guard.split("%7C")[0].split("|")[0] if guard else ""
+        if not sid:
+            return cookies
+        for name in ("sessionid", "sid_tt", "sessionid_ss"):
+            cookies.append(
+                {
+                    "name": name,
+                    "value": sid,
+                    "domain": ".tiktok.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                }
+            )
+        log.info("sessionid восстановлен из sid_guard: %s...", sid[:8])
+        return cookies
 
     def _save_cookies(self, context: Optional[BrowserContext]) -> None:
         # Не затираем рабочий cookie-файл, если вход так и не случился.
