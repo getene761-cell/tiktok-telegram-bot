@@ -197,8 +197,10 @@ class VideoSearcher(TikTokWorker):
                 context = self._new_context(browser, account)
                 page = context.new_page()
                 self.page = page
+                # Поиск работает и без логина: не валим затею из-за протухших cookies,
+                # просто предупреждаем — выдача может быть беднее.
                 if not self._ensure_logged_in(page, account):
-                    raise LoginFailed("поиск: не удалось войти в аккаунт")
+                    log.warning("поиск: вход не выполнен, пробую выдачу без логина")
                 collected = self._scan(page, query, scan_limit)
                 if since_ts and any(not hit.create_time for hit in collected):
                     self._enrich_dates(page, collected)
