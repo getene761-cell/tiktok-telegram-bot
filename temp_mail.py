@@ -25,6 +25,8 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 
 CODE_RE = re.compile(r"\b(\d{6})\b")
+# TikTok кладёт в письмо ещё и годы/номера — код ищем рядом со словом «код»
+CODE_NEAR_RE = re.compile(r"(?:код|code)[^0-9]{0,25}(\d{6})", re.IGNORECASE)
 MAILGW_API = "https://api.mail.gw"
 
 
@@ -57,7 +59,11 @@ def gen_password(length: int = 14) -> str:
 
 
 def extract_code(text: str) -> Optional[str]:
-    match = CODE_RE.search(text or "")
+    text = text or ""
+    near = CODE_NEAR_RE.search(text)
+    if near:
+        return near.group(1)
+    match = CODE_RE.search(text)
     return match.group(1) if match else None
 
 
@@ -195,6 +201,7 @@ class TempMail:
                 )
                 code = extract_code(blob)
                 if code:
+                    log.info("guerrillamail: письмо \"%s\" → код %s", str(full.get("mail_subject", ""))[:60], code)
                     return code
             time.sleep(interval)
         return None

@@ -475,6 +475,12 @@ class AccountRegistrar(TikTokWorker):
                 page.wait_for_timeout(1500)
                 continue
             self._type_into(field, code)
+            page.wait_for_timeout(300)
+            # OTP-поле могло быть набором ячеек: добиваем цифры через клавиатуру
+            try:
+                page.keyboard.type(code, delay=random.randint(50, 110))
+            except PWError:
+                pass
             page.wait_for_timeout(500)
             if not self._click_text(
                 page, ("Отправить код", "Зарегистрироваться", "Далее", "Продолжить")
