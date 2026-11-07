@@ -174,7 +174,7 @@ class AccountRegistrar(TikTokWorker):
 
         if email_mode == "temp":
             mail = TempMail()
-            self.progress("📮 Создаю временный ящик mail.tm…")
+            self.progress("📮 Создаю временный ящик…")
             last_error: Optional[Exception] = None
             for attempt in range(3):
                 try:
@@ -415,9 +415,12 @@ class AccountRegistrar(TikTokWorker):
         self._handle_captcha(page)
 
         try:
-            body = page.inner_text("body", timeout=3000).lower()
+            body_raw = page.inner_text("body", timeout=3000)
         except (PWError, PWTimeout):
-            body = ""
+            body_raw = ""
+        body = body_raw.lower()
+        if body_raw:
+            log.info("после отправки формы: %s", body_raw[:240].replace("\n", " | "))
         for marker in ("слишком много попыток", "too many attempts", "too many requests"):
             if marker in body:
                 raise SignupBlocked(
@@ -446,11 +449,17 @@ class AccountRegistrar(TikTokWorker):
             page.wait_for_timeout(2000)
 
         if mail is not None:
-            self.progress("📬 Жду письмо с кодом (до 4 минут)…")
-            code = mail.wait_for_code(token, timeout=240)
-            if code:
-                return code
-            self.progress("⚠️ Письмо не пришло, спрашиваю код у тебя")
+            # Ящик наш (временный или IMAP): код читаем сами, у человека доступа нет.
+            for round_index in range(3):
+                self.progress("📬 Жду письмо с кодом (до 4 минут)…")
+                code = mail.wait_for_code(token, timeout=240)
+                if code:
+                    return code
+                if round_index < 2:
+                    self.progress("🔁 Код не пришёл, прошу TikTok прислать ещё раз…")
+                    self._resend_code(page)
+            self.progress("❌ Код так и не пришёл — ящик не получил письмо от TikTok")
+            return None
 
         code = self.solver.ask_sync(
             self.bot_loop,
@@ -462,6 +471,19 @@ class AccountRegistrar(TikTokWorker):
 
         digits = _digits(code)
         return digits if len(digits) >= 4 else code.strip()
+
+    def _resend_code(self, page: Page) -> None:
+        """Нажимает «Отправить код»/«Отправить ещё раз», если письмо не пришло."""
+        self._dismiss_overlays(page)
+        self._handle_captcha(page)
+        clicked = self._click_text(
+            page,
+            ("Отправить ещё раз", "Отправить код заново", "Отправить код", "Resend code", "Resend"),
+        )
+        if not clicked:
+            self._click_first(page, PRIMARY_SELECTORS)
+        page.wait_for_timeout(random.randint(2000, 3500))
+        self._handle_captcha(page)
 
     def _enter_code(self, page: Page, code: str) -> bool:
         self.progress("🔑 Ввожу код подтверждения…")
