@@ -53,6 +53,7 @@ class VideoHit:
     create_time: int = 0
     comments: int = 0
     likes: int = 0
+    plays: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -111,6 +112,7 @@ def _hit_from_item(item: dict[str, Any]) -> Optional[VideoHit]:
         create_time=create_time,
         comments=_int(stats.get("commentCount") or stats.get("comment_count") or 0),
         likes=_int(stats.get("diggCount") or stats.get("digg_count") or 0),
+        plays=_int(stats.get("playCount") or stats.get("play_count") or 0),
     )
 
 
@@ -182,6 +184,7 @@ class VideoSearcher(TikTokWorker):
         query: str,
         since_ts: float = 0.0,
         scan_limit: int = 0,
+        min_views: int = 0,
     ) -> dict[str, Any]:
         scan_limit = scan_limit or config.SEARCH_SCAN_LIMIT
         self.status.reset()
@@ -213,9 +216,16 @@ class VideoSearcher(TikTokWorker):
                 self.status.action = "поиск завершён"
 
         filtered = [hit for hit in collected if not since_ts or hit.create_time >= since_ts]
+        if min_views:
+            filtered = [hit for hit in filtered if hit.plays >= min_views]
         filtered.sort(key=lambda hit: hit.create_time, reverse=True)
         log.info("поиск: собрано %d, после фильтра %d", len(collected), len(filtered))
-        return {"found": len(collected), "filtered": len(filtered), "hits": filtered}
+        return {
+            "found": len(collected),
+            "filtered": len(filtered),
+            "hits": filtered,
+            "min_views": min_views,
+        }
 
     # ------------------------------------------------------------------ scan
     def _scan(self, page: Page, query: str, limit: int) -> list[VideoHit]:

@@ -122,6 +122,8 @@ class St(StatesGroup):
     search_query = State()
     search_date = State()
     search_custom_date = State()
+    search_views = State()
+    search_views_custom = State()
     reg_count = State()
     reg_custom = State()
 
@@ -403,7 +405,10 @@ def _video_line(index: int, video: dict[str, Any]) -> str:
         date = "дата ?"
     desc = (video.get("desc") or "").replace("\n", " ")[:60]
     comments = int(video.get("comments") or 0)
-    return f"{index + 1}. @{author} · {date} · 💬{comments}\n   {desc}"
+    plays = int(video.get("plays") or 0)
+    return (
+        f"{index + 1}. @{author} · {date} · 👁{_fmt_views(plays)} · 💬{comments}\n   {desc}"
+    )
 
 
 def _results_keyboard(count: int) -> InlineKeyboardMarkup:
@@ -419,12 +424,48 @@ def _results_keyboard(count: int) -> InlineKeyboardMarkup:
     )
 
 
+VIEW_PRESETS: dict[str, tuple[str, int]] = {
+    "any": ("любые", 0),
+    "1k": ("> 1 000", 1_000),
+    "10k": ("> 10 000", 10_000),
+    "100k": ("> 100 000", 100_000),
+    "1m": ("> 1 000 000", 1_000_000),
+}
+
+
+def kb_views() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👁 Любые", callback_data="sv:any"),
+                InlineKeyboardButton(text="> 1 000", callback_data="sv:1k"),
+                InlineKeyboardButton(text="> 10 000", callback_data="sv:10k"),
+            ],
+            [
+                InlineKeyboardButton(text="> 100 000", callback_data="sv:100k"),
+                InlineKeyboardButton(text="> 1 000 000", callback_data="sv:1m"),
+            ],
+            [InlineKeyboardButton(text="✍️ Свой минимум", callback_data="sv:custom")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="main")],
+        ]
+    )
+
+
+def _fmt_views(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+
 async def run_search(
     account_index: int,
     query: str,
     since_ts: float,
     label: str,
     chat_id: int,
+    min_views: int = 0,
 ) -> None:
     if SEARCH["running"]:
         await bot_send(chat_id, "⚠️ Поиск уже идёт")
@@ -435,7 +476,12 @@ async def run_search(
         return
 
     SEARCH.update(
-        running=True, query=query, label=label, account=account_index, since_ts=since_ts
+        running=True,
+        query=query,
+        label=label,
+        account=account_index,
+        since_ts=since_ts,
+        min_views=min_views,
     )
     searcher = VideoSearcher(
         solver,
@@ -445,7 +491,7 @@ async def run_search(
         config.STOP_EVENT,
     )
     task = asyncio.create_task(
-        asyncio.to_thread(searcher.search, accounts[account_index], query, since_ts)
+        asyncio.to_thread(searcher.search, accounts[account_index], query, since_ts, 0, min_views)
     )
     task.add_done_callback(lambda t: asyncio.create_task(_on_search_done(t, chat_id, label)))
 
@@ -472,10 +518,13 @@ async def _on_search_done(task: "asyncio.Task", chat_id: int, label: str) -> Non
     TARGETS.clear()
     TARGETS.extend(hit.as_dict() for hit in hits)
 
+    min_views = int(result.get("min_views") or 0)
+    vlabel = f"> {min_views}" if min_views else "любые"
     head = (
         f"🔎 «{SEARCH['query']}» — {label}\n"
+        f"Просмотры: 👁 {vlabel}\n"
         f"Найдено в выдаче: {result['found']}\n"
-        f"После фильтра по дате: {result['filtered']}\n"
+        f"После фильтров (дата + просмотры): {result['filtered']}\n"
         f"В очереди на комментирование: {len(hits)}\n\n"
     )
     if not hits:
@@ -585,10 +634,13 @@ async def cb_search_date(callback: CallbackQuery, state: FSMContext) -> None:
 
     label, seconds = DATE_PRESETS.get(key, DATE_PRESETS["any"])
     since_ts = time.time() - seconds if seconds else 0.0
-    await state.clear()
-    await callback.message.edit_text(f"🔎 Ищу «{query}» ({label})…\nЭто займёт до минуты.")
+    await state.update_data(since_ts=since_ts, label=label, account=account_index, query=query)
+    await state.set_state(St.search_views)
+    await callback.message.edit_text(
+        f"Запрос: «{query}», период: {label}\n\nФильтр по просмотрам?",
+        reply_markup=kb_views(),
+    )
     await callback.answer()
-    await run_search(account_index, query, since_ts, label, callback.message.chat.id)
 
 
 @router.message(St.search_custom_date, F.text, IsAdmin())
@@ -602,8 +654,66 @@ async def search_custom_date(message: Message, state: FSMContext) -> None:
     account_index = int(data.get("account") or 0)
     await state.clear()
     label = f"с {datetime.fromtimestamp(since_ts).strftime('%d.%m.%Y')}"
-    await message.answer(f"🔎 Ищу «{query}» ({label})…")
-    await run_search(account_index, query, since_ts, label, message.chat.id)
+    await state.update_data(since_ts=since_ts, label=label, account=account_index, query=query)
+    await state.set_state(St.search_views)
+    await message.answer(
+        f"Запрос: «{query}», период: {label}\n\nФильтр по просмотрам?",
+        reply_markup=kb_views(),
+    )
+
+
+@router.callback_query(F.data.startswith("sv:"), IsAdmin())
+async def cb_search_views(callback: CallbackQuery, state: FSMContext) -> None:
+    key = str(callback.data).split(":", 1)[1]
+    data = await state.get_data()
+    query = str(data.get("query") or "")
+    since_ts = float(data.get("since_ts") or 0)
+    label = str(data.get("label") or "")
+    account_index = int(data.get("account") or 0)
+    if not query:
+        await callback.answer("Сессия поиска потерялась, начни заново", show_alert=True)
+        return
+
+    if key == "custom":
+        await state.set_state(St.search_views_custom)
+        await callback.message.edit_text(
+            "Пришли минимальное число просмотров: 5000, 10k, 1m\nПришли 0 — без фильтра."
+        )
+        await callback.answer()
+        return
+
+    vlabel, min_views = VIEW_PRESETS.get(key, VIEW_PRESETS["any"])
+    await state.clear()
+    await callback.message.edit_text(f"🔎 «{query}» · {label} · 👁 {vlabel}\nИщу…")
+    await callback.answer()
+    await run_search(
+        account_index, query, since_ts, label, callback.message.chat.id, min_views
+    )
+
+
+@router.message(St.search_views_custom, F.text, IsAdmin())
+async def search_views_custom(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip().replace(" ", "").lower()
+    mult = 1
+    if raw.endswith("k"):
+        mult, raw = 1_000, raw[:-1]
+    elif raw.endswith("m"):
+        mult, raw = 1_000_000, raw[:-1]
+    try:
+        min_views = int(float(raw) * mult)
+    except ValueError:
+        await message.answer("Нужно число: 5000, 10k, 1m")
+        return
+
+    data = await state.get_data()
+    query = str(data.get("query") or "")
+    since_ts = float(data.get("since_ts") or 0)
+    label = str(data.get("label") or "")
+    account_index = int(data.get("account") or 0)
+    await state.clear()
+    vlabel = f"> {min_views}" if min_views else "любые"
+    await message.answer(f"🔎 «{query}» · {label} · 👁 {vlabel}\nИщу…")
+    await run_search(account_index, query, since_ts, label, message.chat.id, min_views)
 
 
 @router.callback_query(F.data == "runfound", IsAdmin())
