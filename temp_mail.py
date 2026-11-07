@@ -155,10 +155,60 @@ class TempMail:
             time.sleep(interval)
         return None
 
+    # ------------------------------------------------------------ guerrillamail
+    GM_API = "https://api.guerrillamail.com/ajax.php"
+
+    def _create_gm(self) -> tuple[str, str, str]:
+        data = self._get_json(self.GM_API + "?f=get_email_address")
+        address = data.get("email_addr")
+        sid = data.get("sid_token")
+        if not address or not sid:
+            raise TempMailError("guerrillamail не выдал адрес")
+        log.info("временный ящик (guerrillamail): %s", address)
+        return address, "", sid
+
+    def _wait_gm(self, token: str, timeout: int, interval: int) -> Optional[str]:
+        sid, _, address = token.partition("|")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                inbox = self._get_json(
+                    f"{self.GM_API}?f=check_email&seq=0&sid_token={sid}"
+                )
+            except TempMailError as exc:
+                log.warning("guerrillamail: %s", exc)
+                time.sleep(interval)
+                continue
+            for message in inbox.get("list") or []:
+                mail_id = message.get("mail_id")
+                if not mail_id:
+                    continue
+                try:
+                    full = self._get_json(
+                        f"{self.GM_API}?f=fetch_email&email_id={mail_id}&sid_token={sid}"
+                    )
+                except TempMailError:
+                    continue
+                blob = " ".join(
+                    str(full.get(key, ""))
+                    for key in ("mail_subject", "mail_body", "mail_excerpt")
+                )
+                code = extract_code(blob)
+                if code:
+                    return code
+            time.sleep(interval)
+        return None
+
     # --------------------------------------------------------------- внешнее
     def create(self) -> tuple[str, str, str]:
         """Ящик на mail.gw, при недоступности — mail.tm. В токене — провайдер."""
         error: Optional[Exception] = None
+        try:
+            address, password, sid = self._create_gm()
+            return address, password, f"gm:{sid}|{address}"
+        except TempMailError as exc:
+            error = exc
+            log.warning("guerrillamail недоступен: %s", exc)
         for _ in range(2):
             try:
                 address, password, token = self._create_gw()
@@ -173,6 +223,8 @@ class TempMail:
 
     def wait_for_code(self, token: str, timeout: int = 240, interval: int = 6) -> Optional[str]:
         provider, _, value = token.partition(":")
+        if provider == "gm":
+            return self._wait_gm(value, timeout, interval)
         if provider == "gw":
             return TempMail(self.timeout, base=MAILGW_API)._wait_mtm(value, timeout, interval)
         return self._wait_mtm(value, timeout, interval)

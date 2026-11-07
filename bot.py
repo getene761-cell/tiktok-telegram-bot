@@ -1141,6 +1141,83 @@ async def cmd_stop(message: Message) -> None:
     await message.answer("⏹ Флаг остановки выставлен", reply_markup=kb_main())
 
 
+def _env_upsert(updates: dict[str, str]) -> None:
+    path = config.BASE_DIR / ".env"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            out.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            out.append(f"{key}={value}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+@router.message(Command("imap"), IsAdmin())
+async def cmd_imap(message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=3)
+    if len(parts) >= 2 and parts[1].lower() == "test":
+        if not ImapMail.ready():
+            await message.answer("IMAP не настроен. Формат: /imap imap.gmail.com you@gmail.com apppassword")
+            return
+        def check() -> str:
+            mail = ImapMail()
+            try:
+                code = mail._poll_once()  # просто логин+чтение, код может быть None
+                return "IMAP: подключение ок, чтение работает" + (" (нашёл код)" if code else " (новых писем с кодом нет)")
+            except Exception as exc:  # noqa: BLE001
+                return f"IMAP: ошибка {exc}"
+        await message.answer(await asyncio.to_thread(check))
+        return
+
+    if len(parts) < 4:
+        await message.answer(
+            "Настройка IMAP одним сообщением:\n"
+            "/imap imap.gmail.com you@gmail.com app-password\n\n"
+            "Gmail: включи 2FA и создай «пароль приложения» (16 символов).\n"
+            "Yandex: пароль приложения. После настройки регистрация берёт адреса\n"
+            "you+tt01@gmail.com и читает коды сама."
+        )
+        return
+
+    host, user, password = parts[1], parts[2], parts[3]
+    _env_upsert(
+        {
+            "IMAP_HOST": host,
+            "IMAP_PORT": "993",
+            "IMAP_USER": user,
+            "IMAP_PASSWORD": password,
+        }
+    )
+    config.IMAP_HOST = host
+    config.IMAP_USER = user
+    config.IMAP_PASSWORD = password
+    await message.answer(
+        f"✅ Записал в .env: {host}, {user}.\n"
+        "Проверяю логин… (и удали это сообщение из чата — в нём пароль)"
+    )
+
+    def check() -> str:
+        mail = ImapMail()
+        try:
+            code = mail._poll_once()
+            return "✅ IMAP работает" + (" (нашёл письмо с кодом)" if code else "")
+        except Exception as exc:  # noqa: BLE001
+            return f"❌ IMAP не пускает: {exc}"
+
+    await message.answer(await asyncio.to_thread(check), reply_markup=kb_main())
+
+
 @router.message(Command("domain"), IsAdmin())
 async def cmd_domain(message: Message) -> None:
     parts = (message.text or "").split(maxsplit=1)
