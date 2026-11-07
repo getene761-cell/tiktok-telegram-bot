@@ -1,0 +1,10 @@
+.env
+bot.log
+__pycache__/
+*.pyc
+cookies/*.json
+cookies/*.txt
+captcha_shots/*.png
+accounts.json
+!accounts.example.json
+.venv/

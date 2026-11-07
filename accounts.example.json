@@ -1,0 +1,20 @@
+{
+  "accounts": [
+    {
+      "name": "acc1",
+      "username": "your_login_or_email",
+      "password": "your_password",
+      "cookies_file": "cookies/acc1.json",
+      "proxy": null,
+      "enabled": true
+    },
+    {
+      "name": "acc2-cookies-only",
+      "username": "",
+      "password": "",
+      "cookies_file": "cookies/acc2.txt",
+      "proxy": null,
+      "enabled": true
+    }
+  ]
+}
