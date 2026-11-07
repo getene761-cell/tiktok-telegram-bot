@@ -23,7 +23,7 @@ import random
 import re
 import time
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from playwright.sync_api import Error as PWError, Page, TimeoutError as PWTimeout, sync_playwright
 
@@ -210,140 +210,140 @@ class AccountRegistrar(TikTokWorker):
 
     # ------------------------------------------------------------------ steps
     def _open_signup(self, page: Page) -> bool:
-        for url in SIGNUP_URLS:
+        # Прямой URL: /signup отдаёт лендинг и уводит на вкладку «телефон».
+        page.goto(
+            "https://www.tiktok.com/signup/phone-or-email/email",
+            wait_until="domcontentloaded",
+        )
+        self._settle(page, 3000)
+        self._dismiss_overlays(page)
+        self._handle_captcha(page)
+        try:
+            page.locator('input[name="email"]').first.wait_for(state="visible", timeout=20000)
+            return True
+        except (PWError, PWTimeout):
+            self._dump_screenshot(page, 0, "signup_open")
+            return False
+
+    def _click_text(self, page: Page, texts: Iterable[str], timeout: int = 4000) -> bool:
+        """Жмёт кнопку по тексту: у TikTok кнопки без submit и без data-e2e."""
+        for text in texts:
+            for locator in (
+                page.get_by_role("button", name=text, exact=False),
+                page.get_by_text(text, exact=False),
+            ):
+                try:
+                    if locator.count():
+                        locator.first.click(timeout=timeout, force=True)
+                        return True
+                except (PWError, PWTimeout):
+                    continue
+        return False
+
+    def _pick_birthday(self, page: Page) -> None:
+        """Три кастомных комбобокса: Месяц, День, Год. Выбор — опцией или стрелками."""
+        combos = page.locator('[role="combobox"]')
+        count = combos.count()
+        year, month, day = _random_birthday()
+        if count < 3:
+            return
+        for index, value in enumerate((month, day, year)):
+            if self.stop_event.is_set():
+                return
             try:
-                page.goto(url, wait_until="domcontentloaded")
-            except Exception:  # noqa: BLE001
+                combo = combos.nth(index)
+                combo.click(timeout=4000, force=True)
+                page.wait_for_timeout(700)
+            except (PWError, PWTimeout):
                 continue
-            self._settle(page, 2500)
-            self._handle_captcha(page)
-            self._dismiss_overlays(page)
-            if page.locator("input").count():
-                break
-        # иногда сначала предлагают «телефон», надо переключиться на e-mail
-        if self._first_visible(page, EMAIL_SELECTORS) is None:
-            self._click_first(page, EMAIL_TAB_SELECTORS)
-            page.wait_for_timeout(1500)
-        return self._first_visible(page, EMAIL_SELECTORS) is not None or page.locator(
-            "input"
-        ).count() > 0
+
+            picked = False
+            for candidate in (value, value.lstrip("0")):
+                try:
+                    option = page.get_by_role("option", name=candidate, exact=True).first
+                    if option.count():
+                        option.click(timeout=3000, force=True)
+                        picked = True
+                        break
+                except (PWError, PWTimeout):
+                    continue
+            if not picked:
+                presses = int(value) if value.isdigit() else 0
+                if index == 2:  # год — любое взрослое значение, не гоняем 30 стрелок
+                    presses = 3
+                for _ in range(min(presses, 30)):
+                    page.keyboard.press("ArrowDown")
+                page.keyboard.press("Enter")
+            page.wait_for_timeout(300)
 
     def _fill_form(self, page: Page, email: str, password: str) -> bool:
         self.progress("✍️ Заполняю форму регистрации…")
-        email_done = password_done = birthday_done = False
+        self._dismiss_overlays(page)
 
-        for step in range(14):
-            if self.stop_event.is_set():
-                return False
-            self._dismiss_overlays(page)
+        email_field = self._first_visible(page, EMAIL_SELECTORS)
+        if email_field is None:
+            return False
+        self._type_into(email_field, email)
+        self._close_autocomplete(page, email_field)
+
+        self._pick_birthday(page)
+        self._handle_captcha(page)
+
+        try:
+            checkbox = page.locator('input[type="checkbox"]').first
+            if checkbox.count() and not checkbox.is_checked():
+                checkbox.check(force=True, timeout=3000)
+        except (PWError, PWTimeout):
+            pass
+
+        if not self._click_text(page, ("Далее", "Next", "Продолжить")):
+            self._click_first(page, PRIMARY_SELECTORS)
+        page.wait_for_timeout(random.randint(1500, 2500))
+        self._handle_captcha(page)
+
+        password_field = self._first_visible(page, PASSWORD_SELECTORS)
+        if password_field is None:
+            return False
+        self._type_into(password_field, password)
+
+        if not self._click_text(
+            page, ("Зарегистрироваться", "Отправить код", "Далее", "Next")
+        ):
+            self._click_first(page, PRIMARY_SELECTORS)
+        page.wait_for_timeout(random.randint(2000, 3500))
+        self._handle_captcha(page)
+
+        for _ in range(6):
+            if self._first_visible(page, CODE_SELECTORS) is not None:
+                return True
+            if self._is_logged_in(page):
+                return True
+            page.wait_for_timeout(1500)
             self._handle_captcha(page)
-
-            # дата рождения — три селекта, TikTok может прятать их за dropdown
-            if not birthday_done:
-                selects = page.locator("select")
-                if selects.count() >= 3:
-                    year, month, day = _random_birthday()
-                    try:
-                        selects.nth(0).select_option(label=_month_name(month))
-                    except PWError:
-                        try:
-                            selects.nth(0).select_option(month)
-                        except PWError:
-                            pass
-                    for idx, value in ((1, day), (2, year)):
-                        try:
-                            selects.nth(idx).select_option(value)
-                        except PWError:
-                            pass
-                    birthday_done = True
-
-            if not email_done:
-                field = self._first_visible(page, EMAIL_SELECTORS)
-                if field is not None and not (field.input_value() or "").strip():
-                    # fill() фокусирует поле без клика мышью: выпадашка автокомплита
-                    # и cookie-баннер больше не перехватывают pointer events.
-                    self._type_into(field, email)
-                    self._close_autocomplete(page, field)
-                    email_done = True
-
-            if not password_done:
-                field = self._first_visible(page, PASSWORD_SELECTORS)
-                if field is not None and not (field.input_value() or "").strip():
-                    self._dismiss_overlays(page)
-                    self._type_into(field, password)
-                    password_done = True
-
-            # уже просят код — форма заполнена
-            if self._first_visible(page, CODE_SELECTORS) is not None:
-                return True
-
-            if email_done and password_done:
-                # всё введено, но кнопки/шаги ещё могут понадобиться
-                if not self._click_first(page, PRIMARY_SELECTORS):
-                    page.keyboard.press("Enter")
-            else:
-                if email_done or birthday_done:
-                    self._click_first(page, PRIMARY_SELECTORS)
-
-            page.wait_for_timeout(random.randint(1200, 2200))
-            if self._captcha_visible(page):
-                self._handle_captcha(page)
-            if self._first_visible(page, CODE_SELECTORS) is not None:
-                return True
-
-        return email_done and password_done
-
-    def _obtain_code(
-        self,
-        page: Page,
-        mail: Optional[TempMail],
-        token: str,
-        email: str,
-    ) -> Optional[str]:
-        if self._first_visible(page, CODE_SELECTORS) is None:
-            # код просят не сразу — дадим странице секунду
-            page.wait_for_timeout(2000)
-
-        if mail is not None and token:
-            self.progress("📬 Жду письмо с кодом (до 4 минут)…")
-            code = mail.wait_for_code(token, timeout=240)
-            if code:
-                return code
-            self.progress("⚠️ Письмо не пришло, спрашиваю код у тебя")
-
-        code = self.solver.ask_sync(
-            self.bot_loop,
-            f"📨 Введи код подтверждения для {email}.\n"
-            "Если письма нет — напиши «нет».",
-        )
-        if not code or code.strip().lower() in ("нет", "no", "none"):
-            return None
-
-        digits = _digits(code)
-        return digits if len(digits) >= 4 else code.strip()
+        return True
 
     def _enter_code(self, page: Page, code: str) -> bool:
         self.progress("🔑 Ввожу код подтверждения…")
-        for _ in range(4):
+        for attempt in range(4):
+            self._dismiss_overlays(page)
             self._handle_captcha(page)
             field = self._first_visible(page, CODE_SELECTORS)
             if field is None:
+                if self._is_logged_in(page):
+                    return True
                 page.wait_for_timeout(1500)
                 continue
-            try:
-                self._dismiss_overlays(page)
-                self._type_into(field, code)
-            except PWError:
-                continue
-            page.wait_for_timeout(600)
-            if not self._click_first(page, PRIMARY_SELECTORS):
-                page.keyboard.press("Enter")
+            self._type_into(field, code)
+            page.wait_for_timeout(500)
+            if not self._click_text(
+                page, ("Зарегистрироваться", "Далее", "Продолжить", "Отправить код")
+            ):
+                self._click_first(page, PRIMARY_SELECTORS)
             page.wait_for_timeout(random.randint(2500, 4000))
             self._handle_captcha(page)
             if self._is_logged_in(page):
                 return True
-            # код могли не принять — покажем ошибку и попробуем ещё раз, если поле живо
-            if page.locator("input").count() == 0:
+            if attempt >= 2:
                 break
         return self._is_logged_in(page)
 
