@@ -37,6 +37,7 @@ from datetime import datetime
 
 import config
 from captcha_solver import CaptchaSolver
+from proxy_pool import POOL
 from register import AccountRegistrar, append_account
 from tiktok_search import (
     DATE_PRESETS,
@@ -145,6 +146,7 @@ def kb_main() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton(text="🔎 Поиск видео", callback_data="search")],
             [InlineKeyboardButton(text="🆕 Регистрация аккаунта", callback_data="reg")],
+            [InlineKeyboardButton(text="🌐 Прокси", callback_data="proxy")],
             [InlineKeyboardButton(text="📁 Загрузить cookies", callback_data="cookies")],
             [
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
@@ -224,6 +226,11 @@ def status_text() -> str:
         f"Капч: {st.captchas_seen}",
         f"В работе: {st.uptime()}",
     ]
+    try:
+        pool = POOL.stats()
+        lines.append(f"Прокси в пуле: {pool['alive']}/{pool['total']}")
+    except Exception:  # noqa: BLE001
+        pass
     if st.last_error:
         lines += ["", f"⚠️ Последняя ошибка: {st.last_error}"]
     return "\n".join(lines)
@@ -667,6 +674,42 @@ async def cb_search_page(callback: CallbackQuery) -> None:
 
 
 # --------------------------------------------------------------------------- #
+#                                   Прокси                                    #
+# --------------------------------------------------------------------------- #
+@router.callback_query(F.data == "proxy", IsAdmin())
+async def cb_proxy(callback: CallbackQuery) -> None:
+    stats = POOL.stats()
+    await callback.message.edit_text(
+        "🌐 Пул бесплатных прокси\n\n"
+        f"Рабочих: {stats['alive']} из {stats['total']}\n\n"
+        "Сбор: proxyscrape, TheSpeedX, monosans, clarketm, roosterkid, openproxylist, geonode.\n"
+        "Проверка: ipify (живой + чужой IP) → tiktok.com (не 403/429).\n"
+        "Регистрация берёт рабочий прокси сама, если REG_PROXY пуст.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить пул", callback_data="proxyrefresh")],
+                [InlineKeyboardButton(text="⬅️ В меню", callback_data="main")],
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "proxyrefresh", IsAdmin())
+async def cb_proxy_refresh(callback: CallbackQuery) -> None:
+    await callback.answer("Собираю и проверяю, это пара минут")
+    await callback.message.edit_text("🌐 Обновляю пул: скачиваю списки и проверяю через TikTok…")
+    alive = await asyncio.to_thread(POOL.refresh)
+    stats = POOL.stats()
+    await callback.message.edit_text(
+        f"🌐 Пул обновлён.\nРабочих: {alive} (в базе {stats['total']})",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="main")]]
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
 #                                Авторегистрация                              #
 # --------------------------------------------------------------------------- #
 async def run_registration(chat_id: int, count: int, mode: str, email: str) -> None:
@@ -1093,11 +1136,22 @@ async def deny_everyone(message: Message) -> None:
         await message.answer("Не понял команду. /menu")
 
 
+async def _proxy_keepalive() -> None:
+    """Раз в 30 минут: добирает пул, если рабочих мало или данные устарели."""
+    while True:
+        try:
+            await asyncio.to_thread(POOL.refresh_if_stale)
+        except Exception:  # noqa: BLE001
+            log.exception("обновление пула прокси")
+        await asyncio.sleep(1800)
+
+
 async def main() -> None:
     global solver, _BOT
 
     setup_logging()
     _restore_targets()
+    asyncio.create_task(_proxy_keepalive())
 
     if not config.BOT_TOKEN or ":" not in config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан. Скопируй .env.example в .env и вставь токен.")

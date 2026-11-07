@@ -29,6 +29,7 @@ from playwright.sync_api import Error as PWError, Page, TimeoutError as PWTimeou
 
 import config
 from temp_mail import TempMail, TempMailError, gen_password
+from proxy_pool import POOL
 from tiktok_worker import TikTokWorker, load_accounts, save_accounts
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ class AccountRegistrar(TikTokWorker):
         super().__init__(*args, **kwargs)
         self.progress = progress or (lambda message: log.info(message))
         self.registered: list[dict[str, Any]] = []
+        self._active_proxy: str = ""  # прокси текущей попытки (для mark_bad)
 
     # ------------------------------------------------------------- entrypoint
     def register_many(
@@ -115,6 +117,11 @@ class AccountRegistrar(TikTokWorker):
                 account = self._register_one(index, email_mode, custom_email)
             except Exception as exc:  # noqa: BLE001 — один провал не рушит пачку
                 log.exception("регистрация %d провалилась", index + 1)
+                if isinstance(exc, SignupBlocked) and self._active_proxy:
+                    try:
+                        POOL.mark_bad(self._active_proxy)
+                    except Exception:  # noqa: BLE001
+                        pass
                 self.progress(f"❌ Аккаунт {index + 1}: {exc}")
                 continue
             if account:
@@ -165,8 +172,17 @@ class AccountRegistrar(TikTokWorker):
         password = gen_password(14)
 
         launch_account: dict[str, Any] = {}
-        if config.REG_PROXY:
-            launch_account["proxy"] = config.REG_PROXY
+        proxy = config.REG_PROXY
+        if not proxy and config.USE_PROXY_POOL:
+            try:
+                proxy = POOL.acquire() or ""
+            except Exception as exc:  # noqa: BLE001 — пул не должен ронять регистрацию
+                log.warning("пул прокси недоступен: %s", exc)
+                proxy = ""
+        self._active_proxy = proxy
+        if proxy:
+            launch_account["proxy"] = proxy
+            self.progress(f"🌐 Прокси: {proxy}")
 
         with sync_playwright() as pw:
             browser = self._launch(pw, launch_account)

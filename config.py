@@ -44,6 +44,9 @@ PROXY: str = os.getenv("PROXY", "").strip() or ""
 # Прокси только для регистрации: TikTok режет по IP жёстче, чем по аккаунту.
 REG_PROXY: str = os.getenv("REG_PROXY", "").strip() or ""
 
+# Бесплатный пул прокси: собирать из публичных списков и проверять на TikTok.
+USE_PROXY_POOL: bool = _bool("USE_PROXY_POOL", True)
+
 # --- Капча ------------------------------------------------------------------
 # Сколько секунд бот ждёт ответа администратора по капче, прежде чем сдаться.
 CAPTCHA_TIMEOUT: int = _int("CAPTCHA_TIMEOUT", 300)
@@ -55,6 +58,8 @@ CAPTCHA_DIR: Path = BASE_DIR / "captcha_shots"
 LOG_FILE: Path = BASE_DIR / "bot.log"
 # Очередь найденных видео; переживает перезапуск бота.
 SEARCH_FILE: Path = BASE_DIR / "search_results.json"
+# Проверенные бесплатные прокси.
+PROXY_FILE: Path = BASE_DIR / "proxy_pool.json"
 # Сколько карточек максимум собирать за один поиск (больше — дольше скролл).
 SEARCH_SCAN_LIMIT: int = _int("SEARCH_SCAN_LIMIT", 120)
 
