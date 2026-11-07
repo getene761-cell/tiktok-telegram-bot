@@ -301,6 +301,7 @@ class TikTokWorker:
         self.stop_event = stop_event
         self.page: Optional[Page] = None
         self._cookie_path = config.COOKIES_DIR / "session.json"
+        self._authenticated = False  # писать cookies можно только после реального входа
 
     # ------------------------------------------------------------- lifecycle
     def run(self, account: dict[str, Any]) -> None:
@@ -422,7 +423,8 @@ class TikTokWorker:
         return []
 
     def _save_cookies(self, context: Optional[BrowserContext]) -> None:
-        if context is None:
+        # Не затираем рабочий cookie-файл, если вход так и не случился.
+        if context is None or not self._authenticated:
             return
         try:
             context.storage_state(path=str(self._cookie_path))
@@ -439,6 +441,7 @@ class TikTokWorker:
 
         if self._is_logged_in(page):
             log.info("сессия активна")
+            self._authenticated = True
             return True
 
         username = str(account.get("username") or "").strip()
@@ -501,6 +504,7 @@ class TikTokWorker:
 
         if self._is_logged_in(page):
             log.info("вход выполнен")
+            self._authenticated = True
             self._save_cookies(page.context)
             return True
         log.error("после входа сессия не найдена")

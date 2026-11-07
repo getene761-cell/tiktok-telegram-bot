@@ -98,6 +98,8 @@ class Status:
         return f"{sec // 60:02d}:{sec % 60:02d}"
 
     def reset(self) -> None:
+        # task НЕ трогаем: ссылку на задачу держит bot.py, иначе гонка
+        # «воркер обнулил task -> бот разрешил второй запуск».
         self.is_running = False
         self.account = "—"
         self.action = "idle"
@@ -106,7 +108,6 @@ class Status:
         self.likes_sent = 0
         self.captchas_seen = 0
         self.started_at = None
-        self.task = None
 
 
 STATUS = Status()
