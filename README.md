@@ -39,9 +39,6 @@ pkg install -y chromium
 # 3. Проект
 git clone https://github.com/getene761-cell/tiktok-telegram-bot.git
 cd tiktok-telegram-bot
-# репозиторий приватный: если git просит пароль, подставь GitHub-токен
-# (Settings -> Developer settings -> Personal access tokens, scope repo):
-# git clone https://getene761-cell:<TOKEN>@github.com/getene761-cell/tiktok-telegram-bot.git
 
 # 4. Python-зависимости
 pip install --upgrade pip
