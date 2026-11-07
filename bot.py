@@ -37,6 +37,7 @@ from datetime import datetime
 
 import config
 from captcha_solver import CaptchaSolver
+from imap_mail import ImapMail
 from proxy_pool import POOL
 from register import AccountRegistrar, append_account
 from tiktok_search import (
@@ -805,16 +806,22 @@ async def reg_count_input(message: Message, state: FSMContext) -> None:
     count = max(1, min(20, count))
     await state.update_data(reg_count=count)
 
+    rows = []
+    if ImapMail.ready():
+        rows.append([InlineKeyboardButton(text="📬 Мой ящик по IMAP (код сам)", callback_data="regm:imap")])
+    rows.extend([
+        [InlineKeyboardButton(text="📮 Временный ящик mail.tm", callback_data="regm:temp")],
+        [InlineKeyboardButton(text="✉️ Свой e-mail (код пришлю в бота)", callback_data="regm:custom")],
+        [InlineKeyboardButton(text="✍️ Свой e-mail, введу код вручную", callback_data="regm:manual")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="main")],
+    ])
+    hint = "" if ImapMail.ready() else (
+        "\n\nℹ️ Чтобы бот сам читал код из твоего ящика, добавь в .env:\n"
+        "IMAP_HOST, IMAP_USER, IMAP_PASSWORD (Gmail app password или Yandex)."
+    )
     await message.answer(
-        f"Сколько: {count}.\n\nОткуда брать почту для регистрации?",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📮 Временный ящик mail.tm", callback_data="regm:temp")],
-                [InlineKeyboardButton(text="✉️ Свой e-mail (код пришлю в бота)", callback_data="regm:custom")],
-                [InlineKeyboardButton(text="✍️ Свой e-mail, введу код вручную", callback_data="regm:manual")],
-                [InlineKeyboardButton(text="⬅️ В меню", callback_data="main")],
-            ]
-        ),
+        f"Сколько: {count}.\n\nОткуда брать почту для регистрации?{hint}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
 
@@ -823,6 +830,16 @@ async def cb_reg_mode(callback: CallbackQuery, state: FSMContext) -> None:
     mode = str(callback.data).split(":", 1)[1]
     data = await state.get_data()
     count = int(data.get("reg_count") or 1)
+
+    if mode == "imap":
+        await state.clear()
+        await callback.message.edit_text(
+            f"🆕 Регистрирую {count} аккаунт(ов) на своём ящике по IMAP.\n"
+            "Адреса чиню сам, код читаю сам — писать ничего не нужно, кроме капчи."
+        )
+        await callback.answer()
+        await run_registration(callback.message.chat.id, count, "imap", "")
+        return
 
     if mode == "temp":
         await state.clear()

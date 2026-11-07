@@ -29,6 +29,7 @@ from playwright.sync_api import Error as PWError, Page, TimeoutError as PWTimeou
 
 import config
 from temp_mail import TempMail, TempMailError, gen_password
+from imap_mail import ImapMail
 from proxy_pool import POOL
 from tiktok_worker import TikTokWorker, load_accounts, save_accounts
 
@@ -156,7 +157,7 @@ class AccountRegistrar(TikTokWorker):
     def _register_one(
         self, index: int, email_mode: str, custom_email: str
     ) -> Optional[dict[str, Any]]:
-        mail: Optional[TempMail] = None
+        mail: Optional[Any] = None
         email = ""
         email_password = ""
         token = ""
@@ -176,6 +177,16 @@ class AccountRegistrar(TikTokWorker):
                     time.sleep(20)
             else:
                 raise RuntimeError(f"mail.tm не дал ящик: {last_error}")
+        elif email_mode == "imap":
+            if not ImapMail.ready():
+                raise RuntimeError(
+                    "IMAP не настроен: добавь IMAP_HOST/IMAP_USER/IMAP_PASSWORD в .env"
+                )
+            mail = ImapMail()
+            email = mail.mint_alias(index)
+            mail.alias = email
+            token = ""
+            self.progress(f"📬 Адрес: {email} (читаю код по IMAP)")
         elif email_mode == "custom":
             email = custom_email.strip()
             if not email or "@" not in email:
@@ -416,7 +427,7 @@ class AccountRegistrar(TikTokWorker):
     def _obtain_code(
         self,
         page: Page,
-        mail: Optional[TempMail],
+        mail: Optional[Any],
         token: str,
         email: str,
     ) -> Optional[str]:
@@ -424,7 +435,7 @@ class AccountRegistrar(TikTokWorker):
         if self._first_visible(page, CODE_SELECTORS) is None:
             page.wait_for_timeout(2000)
 
-        if mail is not None and token:
+        if mail is not None:
             self.progress("📬 Жду письмо с кодом (до 4 минут)…")
             code = mail.wait_for_code(token, timeout=240)
             if code:

@@ -41,6 +41,16 @@ HEADLESS: bool = _bool("HEADLESS", True)
 NAV_TIMEOUT: int = _int("NAV_TIMEOUT", 60000)
 ACTION_TIMEOUT: int = _int("ACTION_TIMEOUT", 8000)
 PROXY: str = os.getenv("PROXY", "").strip() or ""
+# --- Почта по IMAP (бот сам чеканит адреса и читает код) ---------------------
+IMAP_HOST: str = os.getenv("IMAP_HOST", "").strip()
+IMAP_PORT: int = _int("IMAP_PORT", 993)
+IMAP_USER: str = os.getenv("IMAP_USER", "").strip()
+IMAP_PASSWORD: str = os.getenv("IMAP_PASSWORD", "").strip()
+# plus — user+tt01@gmail.com; subdomain — tt01@свой-домен (catch-all)
+EMAIL_MODE: str = os.getenv("EMAIL_MODE", "plus").strip() or "plus"
+EMAIL_DOMAIN: str = os.getenv("EMAIL_DOMAIN", "").strip()
+ALIAS_PREFIX: str = os.getenv("ALIAS_PREFIX", "tt").strip() or "tt"
+
 # Прокси только для регистрации: TikTok режет по IP жёстче, чем по аккаунту.
 REG_PROXY: str = os.getenv("REG_PROXY", "").strip() or ""
 
