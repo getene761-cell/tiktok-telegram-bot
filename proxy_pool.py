@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -41,7 +44,6 @@ SOURCES: tuple[tuple[str, str], ...] = (
     ("text", "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt"),
     ("text", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt"),
     ("text", "https://api.openproxylist.xyz/http.txt"),
-    ("text", "https://www.proxy-list.download/api/v1/get?type=http"),
     ("json", "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&protocols=http,https"),
 )
 
@@ -52,8 +54,8 @@ class ProxyPool:
     def __init__(
         self,
         path: Optional[Any] = None,
-        workers: int = 40,
-        timeout: int = 8,
+        workers: int = 80,
+        timeout: int = 5,
     ) -> None:
         self.path = path or config.PROXY_FILE
         self.workers = workers
@@ -115,54 +117,52 @@ class ProxyPool:
         return sorted(found)
 
     # --------------------------------------------------------------- checks
-    def _check_generic(self, proxy: str) -> Optional[float]:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": f"http://{proxy}", "https": f"http://{proxy}"})
-        )
-        request = urllib.request.Request("https://api.ipify.org?format=json")
-        request.add_header("User-Agent", UA)
+    def _check_connect(self, proxy: str, host: str = "www.tiktok.com", port: int = 443) -> Optional[float]:
+        """CONNECT-туннель до TikTok + TLS-рукопожатие. Полный аналог того, что делает Chromium.
+
+        Отсекает главную беду бесплатных списков: сервера, которые проксируют только
+        plain HTTP и отвечают на CONNECT «400». С ними TikTok не открыть.
+        """
+        host_part, _, port_part = proxy.partition(":")
+        if not host_part or not port_part.isdigit():
+            return None
         started = time.time()
         try:
-            with opener.open(request, timeout=self.timeout) as response:
-                if response.status != 200:
-                    return None
-                raw = response.read().decode("utf-8", "ignore")
-        except Exception:  # noqa: BLE001
+            sock = socket.create_connection((host_part, int(port_part)), timeout=self.timeout)
+        except OSError:
             return None
-        try:
-            ip = json.loads(raw).get("ip", "")
-        except json.JSONDecodeError:
-            return None
-        # прокси должен отдавать чужой IP, а не наш собственный
-        return time.time() - started if ip else None
 
-    def _check_tiktok(self, proxy: str) -> bool:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": f"http://{proxy}", "https": f"http://{proxy}"})
-        )
-        request = urllib.request.Request("https://www.tiktok.com/")
-        request.add_header("User-Agent", UA)
-        request.add_header("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")
         try:
-            with opener.open(request, timeout=self.timeout + 4) as response:
-                return response.status in (200, 301, 302, 303, 307, 308)
-        except urllib.error.HTTPError as exc:
-            # 403/429 — TikTok видит, но капчует: для регистрации бесполезен
-            return exc.code in (301, 302)
-        except Exception:  # noqa: BLE001
-            return False
+            sock.settimeout(self.timeout)
+            sock.sendall(
+                f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode()
+            )
+            head = sock.recv(256)
+            first_line = head.split(b"\r\n", 1)[0]
+            if b" 200" not in first_line:
+                return None
+            context = ssl.create_default_context()
+            tls = context.wrap_socket(sock, server_hostname=host)
+            tls.close()
+        except (OSError, ssl.SSLError):
+            return None
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        return round(time.time() - started, 2)
 
     def check(self, proxy: str) -> dict[str, Any]:
-        latency = self._check_generic(proxy)
+        latency = self._check_connect(proxy)
         if latency is None:
             return {"addr": proxy, "ok": False, "latency": 0.0, "fails": 1}
-        if not self._check_tiktok(proxy):
-            return {"addr": proxy, "ok": False, "latency": latency, "fails": 1}
-        return {"addr": proxy, "ok": True, "latency": round(latency, 2), "fails": 0}
+        return {"addr": proxy, "ok": True, "latency": latency, "fails": 0}
 
-    def refresh(self, max_check: int = 250) -> int:
+    def refresh(self, max_check: int = 400) -> int:
         """Пересобирает пул: скачать список, проверить, оставить живые."""
         candidates = self.fetch()
+        random.shuffle(candidates)
         if max_check:
             candidates = candidates[:max_check]
         if not candidates:
