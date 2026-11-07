@@ -113,16 +113,32 @@ class AccountRegistrar(TikTokWorker):
             self.status.progress = f"{index + 1}/{total}"
             self.status.action = f"регистрация {index + 1}/{total}"
             self.progress(f"🆕 Регистрация {index + 1}/{total}: готовлю почту…")
-            try:
-                account = self._register_one(index, email_mode, custom_email)
-            except Exception as exc:  # noqa: BLE001 — один провал не рушит пачку
-                log.exception("регистрация %d провалилась", index + 1)
-                if isinstance(exc, SignupBlocked) and self._active_proxy:
-                    try:
-                        POOL.mark_bad(self._active_proxy)
-                    except Exception:  # noqa: BLE001
-                        pass
-                self.progress(f"❌ Аккаунт {index + 1}: {exc}")
+            account = None
+            for attempt in range(3):
+                if self.stop_event.is_set():
+                    break
+                try:
+                    account = self._register_one(index, email_mode, custom_email)
+                    break
+                except (SignupBlocked, PWError) as exc:
+                    # прокси-проблема (туннель/таймаут) или IP-троттлинг: меняем прокси
+                    log.warning("попытка %d/3 провалилась: %s", attempt + 1, exc)
+                    if self._active_proxy:
+                        try:
+                            POOL.mark_bad(self._active_proxy)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if attempt < 2:
+                        self.progress(
+                            f"🔁 Прокси не вывез ({str(exc)[:80]}), беру другой ({attempt + 2}/3)"
+                        )
+                        time.sleep(random.uniform(2, 5))
+                except Exception as exc:  # noqa: BLE001 — почта/форма, прокси не поможет
+                    log.exception("регистрация %d провалилась", index + 1)
+                    self.progress(f"❌ Аккаунт {index + 1}: {exc}")
+                    break
+            if account is None:
+                self.progress(f"❌ Аккаунт {index + 1} не зарегистрирован")
                 continue
             if account:
                 self.registered.append(account)
