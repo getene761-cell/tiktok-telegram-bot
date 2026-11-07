@@ -25,7 +25,7 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from playwright.sync_api import Error as PWError, Page, sync_playwright
+from playwright.sync_api import Error as PWError, Page, TimeoutError as PWTimeout, sync_playwright
 
 import config
 from temp_mail import TempMail, TempMailError, gen_password
@@ -217,6 +217,7 @@ class AccountRegistrar(TikTokWorker):
                 continue
             self._settle(page, 2500)
             self._handle_captcha(page)
+            self._dismiss_overlays(page)
             if page.locator("input").count():
                 break
         # иногда сначала предлагают «телефон», надо переключиться на e-mail
@@ -234,6 +235,7 @@ class AccountRegistrar(TikTokWorker):
         for step in range(14):
             if self.stop_event.is_set():
                 return False
+            self._dismiss_overlays(page)
             self._handle_captcha(page)
 
             # дата рождения — три селекта, TikTok может прятать их за dropdown
@@ -258,15 +260,17 @@ class AccountRegistrar(TikTokWorker):
             if not email_done:
                 field = self._first_visible(page, EMAIL_SELECTORS)
                 if field is not None and not (field.input_value() or "").strip():
-                    field.click()
-                    page.keyboard.type(email, delay=random.randint(40, 100))
+                    # fill() фокусирует поле без клика мышью: выпадашка автокомплита
+                    # и cookie-баннер больше не перехватывают pointer events.
+                    self._type_into(field, email)
+                    self._close_autocomplete(page, field)
                     email_done = True
 
             if not password_done:
                 field = self._first_visible(page, PASSWORD_SELECTORS)
                 if field is not None and not (field.input_value() or "").strip():
-                    field.click()
-                    page.keyboard.type(password, delay=random.randint(40, 100))
+                    self._dismiss_overlays(page)
+                    self._type_into(field, password)
                     password_done = True
 
             # уже просят код — форма заполнена
@@ -327,8 +331,8 @@ class AccountRegistrar(TikTokWorker):
                 page.wait_for_timeout(1500)
                 continue
             try:
-                field.click()
-                page.keyboard.type(code, delay=random.randint(60, 130))
+                self._dismiss_overlays(page)
+                self._type_into(field, code)
             except PWError:
                 continue
             page.wait_for_timeout(600)
@@ -344,6 +348,50 @@ class AccountRegistrar(TikTokWorker):
         return self._is_logged_in(page)
 
     # ------------------------------------------------------------------ utils
+    def _dismiss_overlays(self, page: Page) -> None:
+        """Сносит cookie-баннер: он перехватывает клики поверх формы."""
+        try:
+            page.evaluate(
+                "() => document.querySelectorAll('tiktok-cookie-banner')"
+                ".forEach(node => node.remove())"
+            )
+        except PWError:
+            pass
+        for selector in (
+            "tiktok-cookie-banner button",
+            "button:has-text('Принять все')",
+            "button:has-text('Принять')",
+            "button:has-text('Accept all')",
+        ):
+            try:
+                node = page.locator(selector).first
+                if node.is_visible(timeout=600):
+                    node.click(timeout=1500, force=True)
+                    break
+            except (PWError, PWTimeout):
+                continue
+
+    def _type_into(self, field: Any, text: str) -> None:
+        """fill() -> фокус и вставка без мыши; fallback — клик с force и посимвольный ввод."""
+        try:
+            field.fill(text, timeout=5000)
+            return
+        except (PWError, PWTimeout):
+            pass
+        try:
+            field.click(timeout=2000, force=True)
+        except (PWError, PWTimeout):
+            pass
+        field.type(text, delay=random.randint(40, 100))
+
+    def _close_autocomplete(self, page: Page, field: Any) -> None:
+        try:
+            page.keyboard.press("Escape")
+            field.evaluate("node => node.blur()")
+        except (PWError, PWTimeout):
+            pass
+        page.wait_for_timeout(300)
+
     def _dump_screenshot(self, page: Page, index: int, tag: str) -> None:
         try:
             path = config.CAPTCHA_DIR / f"reg_{index + 1}_{tag}_{int(time.time())}.png"
