@@ -33,8 +33,18 @@ from aiogram.types import (
     Message,
 )
 
+from datetime import datetime
+
 import config
 from captcha_solver import CaptchaSolver
+from tiktok_search import (
+    DATE_PRESETS,
+    VideoHit,
+    VideoSearcher,
+    load_results,
+    save_results,
+    since_from_custom,
+)
 from tiktok_worker import (
     TikTokWorker,
     load_accounts,
@@ -48,6 +58,23 @@ router = Router()
 solver: Optional[CaptchaSolver] = None
 SETTINGS: dict[str, Any] = dict(config.DEFAULT_SETTINGS)
 LAST_COOKIE: dict[str, Any] = {"path": ""}
+
+# Состояние поиска: идёт ли, что искали, каким аккаунтом.
+SEARCH: dict[str, Any] = {"running": False, "query": "", "label": "", "account": 0}
+# Очередь найденных видео (словари VideoHit.as_dict()).
+TARGETS: list[dict[str, Any]] = []
+
+
+def _restore_targets() -> None:
+    data = load_results()
+    videos = data.get("videos")
+    if isinstance(videos, list):
+        TARGETS.clear()
+        TARGETS.extend(v for v in videos if isinstance(v, dict) and v.get("url"))
+        SEARCH["query"] = str(data.get("query") or "")
+        SEARCH["label"] = str(data.get("label") or "")
+        if TARGETS:
+            log.info("восстановлена очередь из search_results.json: %d видео", len(TARGETS))
 
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +115,8 @@ class PendingCaptcha(BaseFilter):
 class St(StatesGroup):
     settings_value = State()
     cookies_input = State()
+    search_query = State()
+    search_custom_date = State()
 
 
 def tail_log(lines: int = 30) -> str:
@@ -111,6 +140,7 @@ def kb_main() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⏹ Остановить", callback_data="stop"),
                 InlineKeyboardButton(text="📊 Статус", callback_data="status"),
             ],
+            [InlineKeyboardButton(text="🔎 Поиск видео", callback_data="search")],
             [InlineKeyboardButton(text="📁 Загрузить cookies", callback_data="cookies")],
             [
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
@@ -198,7 +228,11 @@ def status_text() -> str:
 # --------------------------------------------------------------------------- #
 #                             Запуск и остановка                              #
 # --------------------------------------------------------------------------- #
-async def launch_worker(account: dict[str, Any], chat_id: int) -> None:
+async def launch_worker(
+    account: dict[str, Any],
+    chat_id: int,
+    run_settings: Optional[dict[str, Any]] = None,
+) -> None:
     global solver
     current = config.STATUS.task
     if current and not current.done():
@@ -213,7 +247,7 @@ async def launch_worker(account: dict[str, Any], chat_id: int) -> None:
     worker = TikTokWorker(
         solver=solver,
         bot_loop=asyncio.get_running_loop(),
-        settings=dict(SETTINGS),
+        settings=dict(run_settings if run_settings is not None else SETTINGS),
         status=config.STATUS,
         stop_event=config.STOP_EVENT,
     )
@@ -343,12 +377,297 @@ async def cb_account(callback: CallbackQuery) -> None:
     await launch_worker(account, callback.message.chat.id)
 
 
+# --------------------------------------------------------------------------- #
+#                            Поиск видео по дате                              #
+# --------------------------------------------------------------------------- #
+def _video_line(index: int, video: dict[str, Any]) -> str:
+    author = video.get("author") or "?"
+    created = int(video.get("create_time") or 0)
+    try:
+        date = datetime.fromtimestamp(created).strftime("%d.%m.%Y") if created else "дата ?"
+    except (OverflowError, OSError, ValueError):
+        date = "дата ?"
+    desc = (video.get("desc") or "").replace("\n", " ")[:60]
+    comments = int(video.get("comments") or 0)
+    return f"{index + 1}. @{author} · {date} · 💬{comments}\n   {desc}"
+
+
+def _results_keyboard(count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"▶️ Комментировать {count} видео", callback_data="runfound")],
+            [InlineKeyboardButton(text=f"📋 Все {count} видео", callback_data="spage:0")],
+            [
+                InlineKeyboardButton(text="🔎 Новый поиск", callback_data="search"),
+                InlineKeyboardButton(text="⬅️ В меню", callback_data="main"),
+            ],
+        ]
+    )
+
+
+async def run_search(
+    account_index: int,
+    query: str,
+    since_ts: float,
+    label: str,
+    chat_id: int,
+) -> None:
+    if SEARCH["running"]:
+        await bot_send(chat_id, "⚠️ Поиск уже идёт")
+        return
+    accounts = load_accounts()
+    if account_index >= len(accounts):
+        await bot_send(chat_id, "❌ Аккаунт не найден, обнови список", kb_back())
+        return
+
+    SEARCH.update(
+        running=True, query=query, label=label, account=account_index, since_ts=since_ts
+    )
+    searcher = VideoSearcher(
+        solver,
+        asyncio.get_running_loop(),
+        dict(SETTINGS),
+        config.Status(),
+        config.STOP_EVENT,
+    )
+    task = asyncio.create_task(
+        asyncio.to_thread(searcher.search, accounts[account_index], query, since_ts)
+    )
+    task.add_done_callback(lambda t: asyncio.create_task(_on_search_done(t, chat_id, label)))
+
+
+async def _on_search_done(task: "asyncio.Task", chat_id: int, label: str) -> None:
+    SEARCH["running"] = False
+    try:
+        result = task.result()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("поиск упал")
+        await bot_send(chat_id, f"🔎 Поиск упал: {exc}", kb_back())
+        return
+
+    hits: list[VideoHit] = result["hits"]
+    path = save_results(
+        hits,
+        {
+            "query": SEARCH["query"],
+            "label": label,
+            "since_ts": SEARCH.get("since_ts", 0),
+            "found": result["found"],
+        },
+    )
+    TARGETS.clear()
+    TARGETS.extend(hit.as_dict() for hit in hits)
+
+    head = (
+        f"🔎 «{SEARCH['query']}» — {label}\n"
+        f"Найдено в выдаче: {result['found']}\n"
+        f"После фильтра по дате: {result['filtered']}\n"
+        f"В очереди на комментирование: {len(hits)}\n\n"
+    )
+    if not hits:
+        await bot_send(chat_id, head + "Пусто. Возьми фильтр мягче или другой запрос.", kb_back())
+        return
+
+    preview = "\n".join(_video_line(i, hit.as_dict()) for i, hit in enumerate(hits[:8]))
+    await bot_send(
+        chat_id,
+        head + preview + f"\n\nСохранено: {path.name}",
+        _results_keyboard(len(hits)),
+    )
+
+
+@router.callback_query(F.data == "search", IsAdmin())
+async def cb_search(callback: CallbackQuery, state: FSMContext) -> None:
+    if SEARCH["running"]:
+        await callback.answer("Поиск уже идёт", show_alert=True)
+        return
+    accounts = load_accounts()
+    if not accounts:
+        await callback.answer()
+        await callback.message.edit_text("❌ Нет аккаунтов в accounts.json", reply_markup=kb_back())
+        return
+    await state.clear()
+    rows = [
+        [InlineKeyboardButton(
+            text=f"👤 {acc.get('name') or acc.get('username') or f'account {i + 1}'}",
+            callback_data=f"sacc:{i}",
+        )]
+        for i, acc in enumerate(accounts)
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="main")])
+    await callback.message.edit_text(
+        "🔎 Поиск видео\n\n"
+        "Выбери аккаунт — его cookies нужны, чтобы TikTok отдал выдачу.\n"
+        "Тот же аккаунт потом пойдёт комментировать найденное.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sacc:"), IsAdmin())
+async def cb_search_account(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        index = int(str(callback.data).split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer("битые данные", show_alert=True)
+        return
+    if index >= len(load_accounts()):
+        await callback.answer("аккаунт исчез", show_alert=True)
+        return
+    await state.set_state(St.search_query)
+    await state.update_data(account=index)
+    await callback.message.edit_text(
+        "🔎 Пришли ключевое слово или фразу.\n"
+        "Например: рецепт пасты, обзор наушников, кот приколы",
+        reply_markup=kb_back(),
+    )
+    await callback.answer()
+
+
+@router.message(St.search_query, F.text, IsAdmin())
+async def search_query_input(message: Message, state: FSMContext) -> None:
+    query = (message.text or "").strip()
+    if len(query) < 2:
+        await message.answer("Слишком коротко, нужно хотя бы 2 символа")
+        return
+    await state.update_data(query=query)
+    await state.set_state(St.search_date)
+    await message.answer(
+        f"Запрос: «{query}»\n\nЗа какой период искать видео?",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🕐 24 часа", callback_data="sf:24h"),
+                    InlineKeyboardButton(text="📅 7 дней", callback_data="sf:7d"),
+                    InlineKeyboardButton(text="🗓 30 дней", callback_data="sf:30d"),
+                ],
+                [InlineKeyboardButton(text="♾ Любая дата", callback_data="sf:any")],
+                [InlineKeyboardButton(text="✍️ Своя дата", callback_data="sf:custom")],
+                [InlineKeyboardButton(text="⬅️ В меню", callback_data="main")],
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("sf:"), IsAdmin())
+async def cb_search_date(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    query = str(data.get("query") or SEARCH["query"] or "")
+    account_index = int(data.get("account") or 0)
+    if not query:
+        await callback.answer("Сначала ключевое слово", show_alert=True)
+        return
+
+    key = str(callback.data).split(":", 1)[1]
+    if key == "custom":
+        await state.set_state(St.search_custom_date)
+        await callback.message.edit_text(
+            "Пришли дату в формате YYYY-MM-DD.\n"
+            "Будут искать видео, опубликованные не раньше неё.",
+            reply_markup=kb_back(),
+        )
+        await callback.answer()
+        return
+
+    label, seconds = DATE_PRESETS.get(key, DATE_PRESETS["any"])
+    since_ts = time.time() - seconds if seconds else 0.0
+    await state.clear()
+    await callback.message.edit_text(f"🔎 Ищу «{query}» ({label})…\nЭто займёт до минуты.")
+    await callback.answer()
+    await run_search(account_index, query, since_ts, label, callback.message.chat.id)
+
+
+@router.message(St.search_custom_date, F.text, IsAdmin())
+async def search_custom_date(message: Message, state: FSMContext) -> None:
+    since_ts = since_from_custom(message.text or "")
+    if since_ts is None:
+        await message.answer("Не разобрал дату. Нужен формат YYYY-MM-DD, например 2026-10-01")
+        return
+    data = await state.get_data()
+    query = str(data.get("query") or "")
+    account_index = int(data.get("account") or 0)
+    await state.clear()
+    label = f"с {datetime.fromtimestamp(since_ts).strftime('%d.%m.%Y')}"
+    await message.answer(f"🔎 Ищу «{query}» ({label})…")
+    await run_search(account_index, query, since_ts, label, message.chat.id)
+
+
+@router.callback_query(F.data == "runfound", IsAdmin())
+async def cb_run_found(callback: CallbackQuery) -> None:
+    if not TARGETS:
+        await callback.answer("Очередь пуста — сначала поиск", show_alert=True)
+        return
+    if config.STATUS.is_running:
+        await callback.answer("Автоматизация уже работает", show_alert=True)
+        return
+
+    accounts = load_accounts()
+    index = int(SEARCH.get("account") or 0)
+    if index >= len(accounts):
+        await callback.answer("Аккаунт поиска пропал, запусти поиск заново", show_alert=True)
+        return
+
+    urls = [str(item.get("url")) for item in TARGETS if item.get("url")]
+    run_settings = dict(SETTINGS)
+    run_settings["mode"] = "search"
+    run_settings["targets"] = urls
+
+    name = accounts[index].get("name") or accounts[index].get("username") or index + 1
+    await callback.message.edit_text(
+        f"▶️ Аккаунт {name}\n"
+        f"Режим: найденные видео\n"
+        f"В очереди: {len(urls)}\n"
+        f"Лимит за запуск: {run_settings['cycles']} (меняется в настройках)"
+    )
+    await callback.answer()
+    await launch_worker(accounts[index], callback.message.chat.id, run_settings)
+
+
+@router.callback_query(F.data.startswith("spage:"), IsAdmin())
+async def cb_search_page(callback: CallbackQuery) -> None:
+    if not TARGETS:
+        await callback.answer("Очередь пуста", show_alert=True)
+        return
+    try:
+        page_index = int(str(callback.data).split(":", 1)[1])
+    except (IndexError, ValueError):
+        page_index = 0
+
+    per_page = 10
+    pages = max(1, (len(TARGETS) + per_page - 1) // per_page)
+    page_index = max(0, min(page_index, pages - 1))
+    chunk = TARGETS[page_index * per_page:(page_index + 1) * per_page]
+    start = page_index * per_page
+
+    lines = "\n".join(_video_line(start + i, video) for i, video in enumerate(chunk))
+    text = (
+        f"🔎 «{SEARCH['query']}» — {SEARCH['label']}\n"
+        f"Всего: {len(TARGETS)} · страница {page_index + 1}/{pages}\n\n{lines}"
+    )
+
+    nav: list[InlineKeyboardButton] = []
+    if page_index > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"spage:{page_index - 1}"))
+    if page_index < pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"spage:{page_index + 1}"))
+
+    rows = []
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(
+        text=f"▶️ Комментировать {len(TARGETS)} видео", callback_data="runfound"
+    )])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="main")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
 @router.callback_query(F.data == "stop", IsAdmin())
 async def cb_stop(callback: CallbackQuery) -> None:
     config.STOP_EVENT.set()
     if solver and solver.has_pending:
         solver.cancel()
-    if config.STATUS.is_running:
+    if config.STATUS.is_running or SEARCH["running"]:
         await callback.message.edit_text("⏹ Останавливаю…", reply_markup=kb_back())
     else:
         await callback.message.edit_text("⚪️ Автоматизация и не была запущена.", reply_markup=kb_back())
@@ -566,7 +885,32 @@ async def cmd_help(message: Message) -> None:
         "/status — статус\n"
         "/logs — последние строки лога\n"
         "/stop — остановить\n"
+        "/search — поиск видео по ключу и дате\n"
         "/help — эта справка"
+    )
+
+
+@router.message(Command("search"), IsAdmin())
+async def cmd_search(message: Message, state: FSMContext) -> None:
+    if SEARCH["running"]:
+        await message.answer("⚠️ Поиск уже идёт")
+        return
+    accounts = load_accounts()
+    if not accounts:
+        await message.answer("❌ Нет аккаунтов в accounts.json")
+        return
+    await state.clear()
+    rows = [
+        [InlineKeyboardButton(
+            text=f"👤 {acc.get('name') or acc.get('username') or f'account {i + 1}'}",
+            callback_data=f"sacc:{i}",
+        )]
+        for i, acc in enumerate(accounts)
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="main")])
+    await message.answer(
+        "🔎 Поиск видео. Выбери аккаунт (его cookies нужны для выдачи):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
 
@@ -600,6 +944,7 @@ async def main() -> None:
     global solver, _BOT
 
     setup_logging()
+    _restore_targets()
 
     if not config.BOT_TOKEN or ":" not in config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан. Скопируй .env.example в .env и вставь токен.")

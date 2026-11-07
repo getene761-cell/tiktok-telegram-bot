@@ -51,6 +51,10 @@ ACCOUNTS_FILE: Path = BASE_DIR / "accounts.json"
 COOKIES_DIR: Path = BASE_DIR / "cookies"
 CAPTCHA_DIR: Path = BASE_DIR / "captcha_shots"
 LOG_FILE: Path = BASE_DIR / "bot.log"
+# Очередь найденных видео; переживает перезапуск бота.
+SEARCH_FILE: Path = BASE_DIR / "search_results.json"
+# Сколько карточек максимум собирать за один поиск (больше — дольше скролл).
+SEARCH_SCAN_LIMIT: int = _int("SEARCH_SCAN_LIMIT", 120)
 
 for _p in (COOKIES_DIR, CAPTCHA_DIR):
     _p.mkdir(parents=True, exist_ok=True)
@@ -63,8 +67,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "delay_min": 8,                # пауза между действиями, сек
     "delay_max": 20,
     "cycles": 10,                  # сколько видео обработать за запуск
-    "mode": "feed",                # feed — лента «Для тебя», url — конкретное видео
+    "mode": "feed",                # feed | url | search (очередь из поиска)
     "target_url": "",              # используется при mode == "url"
+    "targets": [],                 # список URL для mode == "search"
     "do_like": True,
     "do_comment": True,
     "do_reply": False,

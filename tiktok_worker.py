@@ -512,6 +512,10 @@ class TikTokWorker:
 
     # --------------------------------------------------------------- actions
     def _run_cycles(self, page: Page) -> None:
+        if self.settings.get("mode") == "search":
+            self._run_search_targets(page)
+            return
+
         target = str(self.settings.get("target_url") or "").strip()
         use_url = self.settings.get("mode") == "url" and target
 
@@ -543,6 +547,43 @@ class TikTokWorker:
         self.status.action = "готово"
         log.info("циклы завершены: комментариев %d, лайков %d, капч %d",
                  self.status.comments_sent, self.status.likes_sent, self.status.captchas_seen)
+
+    def _run_search_targets(self, page: Page) -> None:
+        """Комментирует очередь видео, найденную через «🔎 Поиск видео» в боте.
+
+        Циклы = сколько видео из очереди обработать. На каждое видео: открыть,
+        проверить капчу, лайк/коммент по настройкам, пауза.
+        """
+        targets = [str(item) for item in (self.settings.get("targets") or []) if item]
+        if not targets:
+            log.warning("режим search, но очередь пуста — нечего комментировать")
+            return
+
+        cycles = int(self.settings.get("cycles") or len(targets))
+        batch = targets[: max(1, cycles)]
+        total = len(batch)
+
+        for index, url in enumerate(batch):
+            if self.stop_event.is_set():
+                log.info("остановка по флагу на видео %d/%d", index, total)
+                break
+            self.status.progress = f"{index + 1}/{total}"
+            self.status.action = f"видео {index + 1}/{total}"
+            log.info("видео %d/%d: %s", index + 1, total, url)
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+            except (PWError, PWTimeout) as exc:
+                log.warning("видео не открылось: %s (%s)", url, exc)
+                continue
+            self._settle(page, 2500)
+            if not self._handle_captcha(page):
+                continue
+            self._act_on_video(page)
+            self._pause()
+
+        self.status.action = "готово"
+        log.info("очередь обработана: комментариев %d, лайков %d",
+                 self.status.comments_sent, self.status.likes_sent)
 
     def _act_on_video(self, page: Page) -> None:
         self._check_blocked(page)

@@ -6,5 +6,6 @@ cookies/*.json
 cookies/*.txt
 captcha_shots/*.png
 accounts.json
+search_results.json
 !accounts.example.json
 .venv/
