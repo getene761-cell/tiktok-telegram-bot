@@ -42,7 +42,6 @@ def main() -> None:
         browser = registrar._launch(pw, {})
         context = registrar._new_context(browser, {})
         page = context.new_page()
-        page.set_default_timeout(config.ACTION_TIMEOUT)
 
         opened = registrar._open_signup(page)
         print("страница открыта:", opened, "| url:", page.url)

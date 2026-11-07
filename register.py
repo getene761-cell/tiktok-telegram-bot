@@ -214,6 +214,7 @@ class AccountRegistrar(TikTokWorker):
         page.goto(
             "https://www.tiktok.com/signup/phone-or-email/email",
             wait_until="domcontentloaded",
+            timeout=config.NAV_TIMEOUT,
         )
         self._settle(page, 3000)
         self._dismiss_overlays(page)
