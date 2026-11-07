@@ -119,6 +119,13 @@ def probe_tiktok(domain: str, proxy: str = "") -> dict[str, Any]:
         progress=lambda message: log.info("probe: %s", message),
     )
 
+    if not proxy:
+        try:
+            from proxy_pool import POOL
+
+            proxy = POOL.acquire() or ""
+        except Exception:  # noqa: BLE001
+            proxy = ""
     launch_account: dict[str, Any] = {}
     if proxy:
         launch_account["proxy"] = proxy
@@ -129,7 +136,12 @@ def probe_tiktok(domain: str, proxy: str = "") -> dict[str, Any]:
             context = registrar._new_context(browser, {})
             page = context.new_page()
             if not registrar._open_signup(page):
-                return {"ok": False, "verdict": "форма не открылась", "address": address}
+                return {
+                    "ok": False,
+                    "verdict": "форма не открылась (прокси медленный или IP в блоке)",
+                    "address": address,
+                    "proxy": proxy,
+                }
             registrar._fill_form(page, address, gen_password(14))
             try:
                 body = page.inner_text("body", timeout=4000).lower()
@@ -143,7 +155,13 @@ def probe_tiktok(domain: str, proxy: str = "") -> dict[str, Any]:
                 verdict = "похоже, TikTok принял домен (код отправлен)"
             else:
                 verdict = "ответ не распознан, смотри скриншот"
-            return {"ok": True, "verdict": verdict, "address": address, "body": body[:300]}
+            return {
+                "ok": True,
+                "verdict": verdict,
+                "address": address,
+                "proxy": proxy,
+                "body": body[:300],
+            }
         finally:
             try:
                 browser.close()

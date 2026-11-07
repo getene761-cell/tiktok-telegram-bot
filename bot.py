@@ -1170,6 +1170,8 @@ async def cmd_domain(message: Message) -> None:
             lines.append("Одноразовый домен: " + ("ДА — TikTok почти наверняка отобьёт" if bad else "нет"))
         lines.append("")
         lines.append("TikTok: " + str(probe.get("verdict", "?")))
+        if probe.get("proxy") is not None and probe.get("proxy") != "":
+            lines.append(f"Прокси: {probe['proxy']}")
         if probe.get("address"):
             lines.append(f"Пробный адрес: {probe['address']}")
         return "\n".join(lines)
