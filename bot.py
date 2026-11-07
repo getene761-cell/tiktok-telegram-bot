@@ -1274,6 +1274,15 @@ def _env_upsert(updates: dict[str, str]) -> None:
         pass
 
 
+@router.message(Command("diag"), IsAdmin())
+async def cmd_diag(message: Message) -> None:
+    import diag
+
+    await message.answer("🔬 Проверяю рендер TikTok и сессию…")
+    report = await asyncio.to_thread(diag.run_diag, dict(SETTINGS))
+    await message.answer(report, reply_markup=kb_main())
+
+
 @router.message(Command("imap"), IsAdmin())
 async def cmd_imap(message: Message) -> None:
     parts = (message.text or "").split(maxsplit=3)
