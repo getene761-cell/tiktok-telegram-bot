@@ -545,7 +545,8 @@ class TikTokWorker:
                 return False
         except (PWError, PWTimeout):
             pass
-        return False
+        # DOM часто пустой (антибот) — спрашиваем у API, есть ли сессия
+        return self._api_logged_in(page)
 
     def _login_password(self, page: Page, username: str, password: str) -> bool:
         log.info("вход по логину/паролю")
