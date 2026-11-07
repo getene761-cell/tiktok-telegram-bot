@@ -37,6 +37,7 @@ from datetime import datetime
 
 import config
 from captcha_solver import CaptchaSolver
+from register import AccountRegistrar, append_account
 from tiktok_search import (
     DATE_PRESETS,
     VideoHit,
@@ -117,6 +118,8 @@ class St(StatesGroup):
     cookies_input = State()
     search_query = State()
     search_custom_date = State()
+    reg_count = State()
+    reg_custom = State()
 
 
 def tail_log(lines: int = 30) -> str:
@@ -141,6 +144,7 @@ def kb_main() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📊 Статус", callback_data="status"),
             ],
             [InlineKeyboardButton(text="🔎 Поиск видео", callback_data="search")],
+            [InlineKeyboardButton(text="🆕 Регистрация аккаунта", callback_data="reg")],
             [InlineKeyboardButton(text="📁 Загрузить cookies", callback_data="cookies")],
             [
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
@@ -660,6 +664,155 @@ async def cb_search_page(callback: CallbackQuery) -> None:
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="main")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
+
+
+# --------------------------------------------------------------------------- #
+#                                Авторегистрация                              #
+# --------------------------------------------------------------------------- #
+async def run_registration(chat_id: int, count: int, mode: str, email: str) -> None:
+    if config.STATUS.is_running:
+        await bot_send(chat_id, "⚠️ Сейчас уже идёт работа. Останови и повтори.")
+        return
+    loop = asyncio.get_running_loop()
+
+    def progress(text: str) -> None:
+        asyncio.run_coroutine_threadsafe(bot_send(chat_id, text), loop)
+
+    config.STOP_EVENT.clear()
+    config.STATUS.reset()
+    config.STATUS.is_running = True
+    config.STATUS.account = "регистрация"
+
+    registrar = AccountRegistrar(
+        solver,
+        loop,
+        dict(SETTINGS),
+        config.STATUS,
+        config.STOP_EVENT,
+        progress=progress,
+    )
+    task = asyncio.create_task(
+        asyncio.to_thread(registrar.register_many, count, mode, email)
+    )
+    config.STATUS.task = task
+    task.add_done_callback(lambda t: asyncio.create_task(_on_registration_done(t, chat_id)))
+
+
+async def _on_registration_done(task: "asyncio.Task", chat_id: int) -> None:
+    st = config.STATUS
+    st.is_running = False
+    st.task = None
+    try:
+        accounts = task.result()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("регистрация упала")
+        await bot_send(chat_id, f"❌ Регистрация упала: {exc}", kb_main())
+        return
+
+    if not accounts:
+        await bot_send(
+            chat_id,
+            "❌ Ни один аккаунт не зарегистрирован.\n"
+            "Смотри /logs и captcha_shots/ — там скриншот шага, на котором встали.",
+            kb_main(),
+        )
+        return
+
+    saved = 0
+    for account in accounts:
+        try:
+            append_account(account)
+            saved += 1
+        except OSError as exc:
+            log.error("аккаунт не записался: %s", exc)
+
+    lines = [f"✅ Зарегистрировано: {len(accounts)} · в accounts.json: {saved}", ""]
+    for account in accounts:
+        lines.append(f"📧 {account['email']}")
+        lines.append(f"🔑 {account['password']}")
+        lines.append(f"🍪 {account['cookies_file']}")
+        lines.append("")
+    lines.append("Пароль от ящика тоже сохранён в accounts.json (email_password).")
+    await bot_send(chat_id, "\n".join(lines), kb_main())
+
+
+@router.callback_query(F.data == "reg", IsAdmin())
+async def cb_registration(callback: CallbackQuery, state: FSMContext) -> None:
+    if config.STATUS.is_running:
+        await callback.answer("Сейчас идёт работа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(St.reg_count)
+    await callback.message.edit_text(
+        "🆕 Авторегистрация TikTok\n\n"
+        "Сколько аккаунтов зарегистрировать? Пришли число (1–20).\n\n"
+        "Капчу буду присылать тебе в этот чат, как и раньше.",
+        reply_markup=kb_back(),
+    )
+    await callback.answer()
+
+
+@router.message(St.reg_count, F.text, IsAdmin())
+async def reg_count_input(message: Message, state: FSMContext) -> None:
+    try:
+        count = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("Нужно число, например 1")
+        return
+    count = max(1, min(20, count))
+    await state.update_data(reg_count=count)
+
+    await message.answer(
+        f"Сколько: {count}.\n\nОткуда брать почту для регистрации?",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📮 Временный ящик mail.tm", callback_data="regm:temp")],
+                [InlineKeyboardButton(text="✉️ Свой e-mail (код пришлю в бота)", callback_data="regm:custom")],
+                [InlineKeyboardButton(text="✍️ Свой e-mail, введу код вручную", callback_data="regm:manual")],
+                [InlineKeyboardButton(text="⬅️ В меню", callback_data="main")],
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("regm:"), IsAdmin())
+async def cb_reg_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    mode = str(callback.data).split(":", 1)[1]
+    data = await state.get_data()
+    count = int(data.get("reg_count") or 1)
+
+    if mode == "temp":
+        await state.clear()
+        await callback.message.edit_text(
+            f"🆕 Регистрирую {count} аккаунт(ов) на временные ящики mail.tm.\n"
+            "Капча и возможные вопросы придут сюда."
+        )
+        await callback.answer()
+        await run_registration(callback.message.chat.id, count, "temp", "")
+        return
+
+    await state.set_state(St.reg_custom)
+    await state.update_data(reg_mode=mode)
+    await callback.message.edit_text(
+        "Пришли e-mail, на который регистрируем.\n"
+        "Код из письма придёт туда — пришли его сюда, когда спрошу.",
+        reply_markup=kb_back(),
+    )
+    await callback.answer()
+
+
+@router.message(St.reg_custom, F.text, IsAdmin())
+async def reg_custom_email(message: Message, state: FSMContext) -> None:
+    email = (message.text or "").strip()
+    if "@" not in email or "." not in email.split("@")[-1]:
+        await message.answer("Не похоже на e-mail. Пример: name@example.com")
+        return
+    data = await state.get_data()
+    mode = str(data.get("reg_mode") or "custom")
+    count = int(data.get("reg_count") or 1)
+    await state.clear()
+    await message.answer(f"🆕 Регистрирую {count} аккаунт(ов) на {email}…")
+    await run_registration(message.chat.id, count, mode, email)
 
 
 @router.callback_query(F.data == "stop", IsAdmin())

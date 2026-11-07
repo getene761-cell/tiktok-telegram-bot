@@ -39,7 +39,7 @@ class CaptchaSolver:
         return list(self._options)
 
     # --------------------------------------------------------------- outbound
-    async def _send(self, image: bytes, caption: str, options: list[str] | None) -> None:
+    async def _send(self, image: Optional[bytes], caption: str, options: list[str] | None) -> None:
         from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
         markup = None
@@ -51,6 +51,15 @@ class CaptchaSolver:
                     for i, opt in enumerate(options)
                 ]
             )
+        if image is None:
+            # Текстовый запрос (код из письма, ручной ввод без картинки).
+            await self.bot.send_message(
+                self.admin_id,
+                caption,
+                reply_markup=markup,
+                parse_mode=None,
+            )
+            return
         await self.bot.send_photo(
             chat_id=self.admin_id,
             photo=BufferedInputFile(image, filename="captcha.png"),
@@ -62,12 +71,12 @@ class CaptchaSolver:
     # ------------------------------------------------------------------ await
     async def request(
         self,
-        image: bytes,
+        image: Optional[bytes],
         caption: str,
         options: list[str] | None = None,
         kind: str = "text",
     ) -> Optional[str]:
-        """Шлёт скриншот, ждёт ответа. Возвращает строку ответа или None по таймауту."""
+        """Шлёт скриншот (или просто текст), ждёт ответа. None по таймауту."""
         if self.has_pending:
             log.warning("капча: уже есть ожидающий запрос, новый проигнорирован")
             return None
@@ -118,6 +127,28 @@ class CaptchaSolver:
             return None
         except Exception as exc:  # noqa: BLE001
             log.exception("капча: ошибка запроса: %s", exc)
+            return None
+
+    def ask_sync(
+        self,
+        bot_loop: asyncio.AbstractEventLoop,
+        caption: str,
+        timeout: Optional[int] = None,
+    ) -> Optional[str]:
+        """Текстовый вопрос без картинки: код из письма, ручное подтверждение.
+
+        Тот же механизм ожидания и тот же submit_text в хендлере — отдельной
+        машинерии не нужно.
+        """
+        future = asyncio.run_coroutine_threadsafe(self.request(None, caption), bot_loop)
+        try:
+            return future.result(timeout=(timeout or self.timeout) + 30)
+        except asyncio.TimeoutError:
+            future.cancel()
+            log.error("капча: ask_sync не дождался корутины")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            log.exception("капча: ошибка текстового запроса: %s", exc)
             return None
 
     # ---------------------------------------------------------------- inbound
