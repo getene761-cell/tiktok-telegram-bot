@@ -362,6 +362,35 @@ class AccountRegistrar(TikTokWorker):
             self._handle_captcha(page)
         return True
 
+    def _obtain_code(
+        self,
+        page: Page,
+        mail: Optional[TempMail],
+        token: str,
+        email: str,
+    ) -> Optional[str]:
+        """Код: из временного ящика, иначе — вопросом в Telegram."""
+        if self._first_visible(page, CODE_SELECTORS) is None:
+            page.wait_for_timeout(2000)
+
+        if mail is not None and token:
+            self.progress("📬 Жду письмо с кодом (до 4 минут)…")
+            code = mail.wait_for_code(token, timeout=240)
+            if code:
+                return code
+            self.progress("⚠️ Письмо не пришло, спрашиваю код у тебя")
+
+        code = self.solver.ask_sync(
+            self.bot_loop,
+            f"📨 Введи код подтверждения для {email}.\n"
+            "Если письма нет — напиши «нет».",
+        )
+        if not code or code.strip().lower() in ("нет", "no", "none"):
+            return None
+
+        digits = _digits(code)
+        return digits if len(digits) >= 4 else code.strip()
+
     def _enter_code(self, page: Page, code: str) -> bool:
         self.progress("🔑 Ввожу код подтверждения…")
         for attempt in range(4):
