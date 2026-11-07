@@ -476,6 +476,21 @@ class TikTokWorker:
             return False
         return self._login_password(page, username, password)
 
+    def _api_logged_in(self, page: Page) -> bool:
+        """Проверка сессии через API, а не по иконке: DOM у TikTok часто не рендерится."""
+        try:
+            result = page.evaluate(
+                """async () => {
+                    const r = await fetch('/passport/web/account/info/?aid=1459&app_name=tiktok_web&device_platform=web',
+                        {headers: {'Accept': 'application/json'}});
+                    const j = await r.json().catch(() => ({}));
+                    return !!(j && j.data && (j.data.user_id || j.data.user_id_str));
+                }"""
+            )
+            return bool(result)
+        except PWError:
+            return False
+
     def _is_logged_in(self, page: Page) -> bool:
         for sel in (
             '[data-e2e="profile-icon"]',
